@@ -52,7 +52,7 @@ stop(ServerPid) ->
 %% the previous and adding the new one.
 -spec add_connection(pid(), atom(), pid()) -> {ok, non_neg_integer()}.
 add_connection(ServerPid, Pool, ConnPid) ->
-	gen_server:call(ServerPid, {add_connection, Pool, ConnPid}).
+	gen_server:call(ServerPid, {add_connection, Pool, ConnPid}, 30000).
 
 %% @doc Move a connection from one pool to another.
 -spec move_connection(pid(), atom(), pid()) -> ok.
