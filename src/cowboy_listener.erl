@@ -32,7 +32,7 @@
 %% @private
 -spec start_link() -> {ok, pid()}.
 start_link() ->
-	gen_server:start_link(?MODULE, [], []).
+	gen_server:start_link(?MODULE, [], [{spawn_opt, [{priority, high}]}]).
 
 %% @private
 -spec stop(pid()) -> stopped.
