@@ -39,8 +39,16 @@ init([NbAcceptors, Transport, TransOpts,
     ConnPeriodMilliSec = proplists:get_value(connection_period_ms, TransOpts, 0),
 	Procs = [{{acceptor, self(), N}, {cowboy_acceptor, start_link, [
 				LSocket, Transport, Protocol, ProtoOpts,
-				MaxConns, MaxConnPerPeriod / NbAcceptors, ConnPeriodMilliSec, 
+				MaxConns, int_ceil(MaxConnPerPeriod / NbAcceptors), ConnPeriodMilliSec, 
                 ListenerPid, ReqsPid
       ]}, permanent, brutal_kill, worker, []}
 		|| N <- lists:seq(1, NbAcceptors)],
 	{ok, {{one_for_one, 10, 10}, Procs}}.
+
+-spec int_ceil(X::number()) -> integer(). 
+int_ceil(X) when is_integer(X) -> X;
+int_ceil(X) ->
+    T = trunc(X),
+    if X > T -> T + 1;
+       true  -> T
+    end.
