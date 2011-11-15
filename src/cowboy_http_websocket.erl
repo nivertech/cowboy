@@ -96,13 +96,16 @@ websocket_upgrade(State, Req) ->
 %% a reply before sending it. Therefore we calculate the challenge
 %% key only in websocket_handshake/3.
 websocket_upgrade(undefined, State, Req) ->
-	{Origin, Req2} = cowboy_http_req:header(<<"Origin">>, Req),
-	{Key1, Req3} = cowboy_http_req:header(<<"Sec-Websocket-Key1">>, Req2),
-	{Key2, Req4} = cowboy_http_req:header(<<"Sec-Websocket-Key2">>, Req3),
+	{<<"WebSocket">>, Req2} = cowboy_http_req:header('Upgrade', Req),
+	{Origin, Req3} = cowboy_http_req:header(<<"Origin">>, Req2),
+	{Key1, Req4} = cowboy_http_req:header(<<"Sec-Websocket-Key1">>, Req3),
+	{Key2, Req5} = cowboy_http_req:header(<<"Sec-Websocket-Key2">>, Req4),
 	false = lists:member(undefined, [Origin, Key1, Key2]),
+	{ok, Key3, Req6} = cowboy_http_req:body(8, Req5),
+	Challenge = hixie76_challenge(Key1, Key2, Key3),
 	EOP = binary:compile_pattern(<< 255 >>),
-	{ok, State#state{version=0, origin=Origin, challenge={Key1, Key2},
-		eop=EOP}, Req4};
+	{ok, State#state{version=0, origin=Origin, challenge=Challenge,
+		eop=EOP}, Req6};
 %% Versions 7 and 8. Implementation follows the hybi 7 through 17 drafts.
 websocket_upgrade(Version, State, Req)
 		when Version =:= <<"7">>; Version =:= <<"8">>;
@@ -165,24 +168,19 @@ upgrade_terminate(#http_req{socket=Socket, transport=Transport}) ->
 
 -spec websocket_handshake(#state{}, #http_req{}, any()) -> ok | none().
 websocket_handshake(State=#state{version=0, origin=Origin,
-		challenge={Key1, Key2}}, Req=#http_req{socket=Socket,
+		challenge=Challenge}, Req=#http_req{socket=_Socket,
 		transport=Transport, raw_host=Host, port=Port,
 		raw_path=Path, raw_qs=QS}, HandlerState) ->
 	Location = hixie76_location(Transport:name(), Host, Port, Path, QS),
-	{ok, Req2} = cowboy_http_req:upgrade_reply(
+	{ok, Req2} = cowboy_http_req:reply(
 		<<"101 WebSocket Protocol Handshake">>,
-		[{<<"Upgrade">>, <<"WebSocket">>},
+		[{<<"Connection">>, <<"Upgrade">>},
+         {<<"Upgrade">>, <<"WebSocket">>},
 		 {<<"Sec-Websocket-Location">>, Location},
 		 {<<"Sec-Websocket-Origin">>, Origin}],
-		Req#http_req{resp_state=waiting}),
-	%% We replied with a proper response. Proxies should be happy enough,
-	%% we can now read the 8 last bytes of the challenge keys and send
-	%% the challenge response directly to the socket.
-	{ok, Key3, Req3} = cowboy_http_req:body(8, Req2),
-	Challenge = hixie76_challenge(Key1, Key2, Key3),
-	Transport:send(Socket, Challenge),
+		Challenge, Req#http_req{resp_state=waiting}),
 	handler_before_loop(State#state{messages=Transport:messages()},
-		Req3, HandlerState, <<>>);
+		Req2, HandlerState, <<>>);
 websocket_handshake(State=#state{challenge=Challenge},
 		Req=#http_req{transport=Transport}, HandlerState) ->
 	{ok, Req2} = cowboy_http_req:upgrade_reply(
