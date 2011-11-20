@@ -37,7 +37,7 @@ ERL_KERNEL_POLL=true
 
 APPS='[application:start(A)||A<-[cowboy]]'
 
-CMD="$ERL $NOSHELLOPT $NAMEOPT +K $ERL_KERNEL_POLL +A $ERL_ASYNC_THREADS +P $ERL_MAX_PROCESSES -setcookie $COOKIE -eval $APPS"
+CMD="$ERL $NOSHELLOPT $NAMEOPT +K $ERL_KERNEL_POLL +A $ERL_ASYNC_THREADS +P $ERL_MAX_PROCESSES -setcookie $COOKIE -boot start_sasl -config simple_ws_server.config -eval $APPS"
 echo $CMD
 $CMD
 
