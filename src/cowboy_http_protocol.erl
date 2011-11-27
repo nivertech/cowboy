@@ -126,6 +126,9 @@ request({http_error, <<"\r\n">>},
 request({http_error, <<"\r\n">>}, State=#state{req_empty_lines=N}) ->
 	parse_request(State#state{req_empty_lines=N + 1});
 request({http_error, _Any}, State) ->
+	error_terminate(400, State);
+request(Other, State) ->
+	error_logger:warning_msg("cowboy_http_protocol:request/2 got bad input ~p~n", [Other]),
 	error_terminate(400, State).
 
 -spec parse_header(#http_req{}, #state{}) -> ok | none().
