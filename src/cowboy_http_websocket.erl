@@ -65,8 +65,8 @@
 %% protocol, you simply need to return <em>{upgrade, protocol, {@module}}</em>
 %% in your <em>cowboy_http_handler:init/3</em> handler function.
 -spec upgrade(pid(), module(), any(), #http_req{}) -> ok | none().
-upgrade(ListenerPid, Handler, Opts, Req) ->
-	cowboy_listener:move_connection(ListenerPid, websocket, self()),
+upgrade(_ListenerPid, Handler, Opts, Req) ->
+	%cowboy_listener:move_connection(ListenerPid, websocket, self()),
 	case catch websocket_upgrade(#state{handler=Handler, opts=Opts}, Req) of
 		{ok, State, Req2} -> handler_init(State, Req2);
 		{'EXIT', _Reason} -> upgrade_error(Req)

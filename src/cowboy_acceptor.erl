@@ -82,14 +82,15 @@ accept_connection(CSocket, Transport, Protocol, Opts, MaxConns, ListenerPid, Req
     {ok, Pid} = supervisor:start_child(ReqsSup,
         [ListenerPid, CSocket, Transport, Protocol, Opts]),
     Transport:controlling_process(CSocket, Pid),
-    {ok, NbConns} = cowboy_listener:add_connection(ListenerPid,
-        default, Pid),
+    %{ok, NbConns} = cowboy_listener:add_connection(ListenerPid,
+    %    default, Pid),
     Pid ! shoot,
-    limit_reqs(ListenerPid, NbConns, MaxConns).
+    limit_reqs(ListenerPid, 0, MaxConns).
                                
 
 -spec limit_reqs(pid(), non_neg_integer(), non_neg_integer()) -> ok.
 limit_reqs(_ListenerPid, NbConns, MaxConns) when NbConns =< MaxConns ->
 	ok;
-limit_reqs(ListenerPid, _NbConns, MaxConns) ->
-	cowboy_listener:wait(ListenerPid, default, MaxConns).
+limit_reqs(_ListenerPid, _NbConns, _MaxConns) ->
+    ok.
+	%cowboy_listener:wait(ListenerPid, default, MaxConns).
