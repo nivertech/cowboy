@@ -102,7 +102,7 @@ websocket_upgrade(undefined, State, #http_req{meta=Meta}=Req) ->
 	Challenge = hixie76_challenge(Key1, Key2, Key3),
 	EOP = binary:compile_pattern(<< 255 >>),
 	{ok, State#state{version=0, origin=Origin, challenge=Challenge,
-		eop=EOP}, Req6#http_req{meta=[{websocket_version, 0}|Meta]};
+		eop=EOP}, Req6#http_req{meta=[{websocket_version, 0}|Meta]}};
 %% Versions 7 and 8. Implementation follows the hybi 7 through 17 drafts.
 websocket_upgrade(Version, State, Req=#http_req{meta=Meta})
 		when Version =:= <<"7">>; Version =:= <<"8">>;
