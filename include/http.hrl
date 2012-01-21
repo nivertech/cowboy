@@ -33,9 +33,11 @@
 	| 'Expires' | 'Last-Modified' | 'Accept-Ranges' | 'Set-Cookie'
 	| 'Set-Cookie2' | 'X-Forwarded-For' | 'Cookie' | 'Keep-Alive'
 	| 'Proxy-Connection' | binary().
--type http_headers() :: list({http_header(), binary()}).
+-type http_headers() :: list({http_header(), iodata()}).
 -type http_cookies() :: list({binary(), binary()}).
 -type http_status() :: non_neg_integer() | binary().
+-type http_resp_body() :: iodata() | {non_neg_integer(),
+		fun(() -> {sent, non_neg_integer()})}.
 
 -record(http_req, {
 	%% Transport.
@@ -44,6 +46,7 @@
 	connection = keepalive :: keepalive | close,
 
 	%% Request.
+	pid        = undefined :: pid(),
 	method     = 'GET'     :: http_method(),
 	version    = {1, 1}    :: http_version(),
 	peer       = undefined :: undefined | {inet:ip_address(), inet:ip_port()},
@@ -60,11 +63,17 @@
 	headers    = []        :: http_headers(),
 	p_headers  = []        :: [any()], %% @todo Improve those specs.
 	cookies    = undefined :: undefined | http_cookies(),
+	meta       = []        :: [{atom(), any()}],
 
 	%% Request body.
 	body_state = waiting   :: waiting | done,
 	buffer     = <<>>      :: binary(),
 
 	%% Response.
-	resp_state = waiting   :: locked | waiting | chunks | done
+	resp_state = waiting   :: locked | waiting | chunks | done,
+	resp_headers = []      :: http_headers(),
+	resp_body  = <<>>      :: http_resp_body(),
+
+	%% Functions.
+	urldecode :: {fun((binary(), T) -> binary()), T}
 }).

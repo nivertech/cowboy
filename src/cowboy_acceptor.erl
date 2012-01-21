@@ -84,7 +84,7 @@ accept_connection(CSocket, Transport, Protocol, Opts, MaxConns, ListenerPid, Req
     Transport:controlling_process(CSocket, Pid),
     %{ok, NbConns} = cowboy_listener:add_connection(ListenerPid,
     %    default, Pid),
-    Pid ! shoot,
+    Pid ! {shoot, ListenerPid},
     limit_reqs(ListenerPid, 0, MaxConns).
                                
 
