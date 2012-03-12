@@ -216,7 +216,15 @@ handler_loop_timeout(State=#state{timeout=Timeout, timeout_ref=PrevRef}) ->
 -spec handler_loop(#state{}, #http_req{}, any(), binary()) -> closed | none().
 handler_loop(State=#state{messages={OK, Closed, Error}, timeout_ref=TRef},
 		Req=#http_req{socket=Socket}, HandlerState, SoFar) ->
-	receive
+    receive Message -> ok end,
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_http_websocket:handler_loop(~p, ~p, ~p, ~p) - received ~p~n",
+                                  [State, Req, HandlerState, SoFar, Message]);
+        false ->
+            ok
+    end,
+    case Message of
 		{OK, Socket, Data} ->
 			websocket_data(State, Req, HandlerState,
 				<< SoFar/binary, Data/binary >>);
@@ -228,7 +236,7 @@ handler_loop(State=#state{messages={OK, Closed, Error}, timeout_ref=TRef},
 			websocket_close(State, Req, HandlerState, {normal, timeout});
 		{?MODULE, timeout, OlderTRef} when is_reference(OlderTRef) ->
 			handler_loop(State, Req, HandlerState, SoFar);
-		Message ->
+		_ ->
 			handler_call(State, Req, HandlerState,
 				SoFar, websocket_info, Message, fun handler_before_loop/4)
 	end.
@@ -433,6 +441,13 @@ websocket_close(State, Req=#http_req{socket=Socket,
 	any(), atom() | {atom(), atom()}) -> closed.
 handler_terminate(#state{handler=Handler, opts=Opts},
 		Req, HandlerState, TerminateReason) ->
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_http_websocket:handler_terminate - Terminating with reason ~p (Req is ~p, HandlerState is ~p)~n",
+                                  [TerminateReason, Req, HandlerState]);
+        false ->
+            ok
+    end,
 	try
 		Handler:websocket_terminate(TerminateReason, Req, HandlerState)
 	catch Class:Reason ->
