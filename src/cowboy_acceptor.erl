@@ -15,45 +15,43 @@
 %% @private
 -module(cowboy_acceptor).
 
--export([start_link/7]). %% API.
+-export([start_link/6]). %% API.
 -export([acceptor/7]). %% Internal.
 
 %% API.
 
 -spec start_link(inet:socket(), module(), module(), any(),
-	non_neg_integer(), pid(), pid()) -> {ok, pid()}.
+	pid(), pid()) -> {ok, pid()}.
 start_link(LSocket, Transport, Protocol, Opts,
-		MaxConns, ListenerPid, ReqsSup) ->
+		ListenerPid, ReqsSup) ->
 	Pid = spawn_link(?MODULE, acceptor,
-		[LSocket, Transport, Protocol, Opts, MaxConns, ListenerPid, ReqsSup]),
+		[LSocket, Transport, Protocol, Opts, 1, ListenerPid, ReqsSup]),
 	{ok, Pid}.
 
 %% Internal.
 
 -spec acceptor(inet:socket(), module(), module(), any(),
 	non_neg_integer(), pid(), pid()) -> no_return().
-acceptor(LSocket, Transport, Protocol, Opts, MaxConns, ListenerPid, ReqsSup) ->
-	case Transport:accept(LSocket, 2000) of
+acceptor(LSocket, Transport, Protocol, Opts, OptsVsn, ListenerPid, ReqsSup) ->
+	Res = case Transport:accept(LSocket, 2000) of
 		{ok, CSocket} ->
 			{ok, Pid} = supervisor:start_child(ReqsSup,
 				[ListenerPid, CSocket, Transport, Protocol, Opts]),
 			Transport:controlling_process(CSocket, Pid),
-			{ok, NbConns} = cowboy_listener:add_connection(ListenerPid,
-				default, Pid),
-			Pid ! shoot,
-			limit_reqs(ListenerPid, NbConns, MaxConns);
+			cowboy_listener:add_connection(ListenerPid,
+				default, Pid, OptsVsn);
 		{error, timeout} ->
-			ignore;
+			cowboy_listener:check_upgrades(ListenerPid, OptsVsn);
 		{error, _Reason} ->
 			%% @todo Probably do something here. If the socket was closed,
 			%%       we may want to try and listen again on the port?
-			ignore
+			ok
 	end,
-	?MODULE:acceptor(LSocket, Transport, Protocol, Opts,
-		MaxConns, ListenerPid, ReqsSup).
-
--spec limit_reqs(pid(), non_neg_integer(), non_neg_integer()) -> ok.
-limit_reqs(_ListenerPid, NbConns, MaxConns) when NbConns =< MaxConns ->
-	ok;
-limit_reqs(ListenerPid, _NbConns, MaxConns) ->
-	cowboy_listener:wait(ListenerPid, default, MaxConns).
+	case Res of
+		ok ->
+			?MODULE:acceptor(LSocket, Transport, Protocol,
+				Opts, OptsVsn, ListenerPid, ReqsSup);
+		{upgrade, Opts2, OptsVsn2} ->
+			?MODULE:acceptor(LSocket, Transport, Protocol,
+				Opts2, OptsVsn2, ListenerPid, ReqsSup)
+	end.
