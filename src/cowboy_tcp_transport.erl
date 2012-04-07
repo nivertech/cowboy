@@ -20,7 +20,7 @@
 -module(cowboy_tcp_transport).
 
 -export([name/0, messages/0, listen/1, accept/2, recv/3, send/2, setopts/2,
-	controlling_process/2, peername/1, close/1]).
+	controlling_process/2, peername/1, close/1, sockname/1]).
 
 %% @doc Name of this transport API, <em>tcp</em>.
 -spec name() -> tcp.
@@ -47,7 +47,7 @@ messages() -> {tcp, tcp_closed, tcp_error}.
 %% </dl>
 %%
 %% @see gen_tcp:listen/2
--spec listen([{port, inet:ip_port()} | {ip, inet:ip_address()}])
+-spec listen([{port, inet:port_number()} | {ip, inet:ip_address()}])
 	-> {ok, inet:socket()} | {error, atom()}.
 listen(Opts) ->
 	{port,Port} = lists:keyfind(port, 1, Opts),
@@ -112,7 +112,7 @@ controlling_process(Socket, Pid) ->
 %% @doc Return the address and port for the other end of a connection.
 %% @see inet:peername/1
 -spec peername(inet:socket())
-	-> {ok, {inet:ip_address(), inet:ip_port()}} | {error, atom()}.
+	-> {ok, {inet:ip_address(), inet:port_number()}} | {error, atom()}.
 peername(Socket) ->
 	inet:peername(Socket).
 
@@ -121,3 +121,10 @@ peername(Socket) ->
 -spec close(inet:socket()) -> ok.
 close(Socket) ->
 	gen_tcp:close(Socket).
+
+%% @doc Get the local address and port of a socket
+%% @see inet:sockname/1
+-spec sockname(inet:socket())
+	-> {ok, {inet:ip_address(), inet:port_number()}} | {error, atom()}.
+sockname(Socket) ->
+	inet:sockname(Socket).

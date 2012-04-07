@@ -24,7 +24,7 @@
 %% @see ssl
 -module(cowboy_ssl_transport).
 -export([name/0, messages/0, listen/1, accept/2, recv/3, send/2, setopts/2,
-	controlling_process/2, peername/1, close/1]).
+	controlling_process/2, peername/1, close/1, sockname/1]).
 
 %% @doc Name of this transport API, <em>ssl</em>.
 -spec name() -> ssl.
@@ -48,18 +48,20 @@ messages() -> {ssl, ssl_closed, ssl_error}.
 %%   by default.</dd>
 %%  <dt>certfile</dt><dd>Mandatory. Path to a file containing the user's
 %%   certificate.</dd>
-%%  <dt>keyfile</dt><dd>Mandatory. Path to the file containing the user's
+%%  <dt>keyfile</dt><dd>Optional. Path to the file containing the user's
 %%   private PEM encoded key.</dd>
 %%  <dt>cacertfile</dt><dd>Optional. Path to file containing PEM encoded
 %%   CA certificates (trusted certificates used for verifying a peer
 %%   certificate).</dd>
-%%  <dt>password</dt><dd>Mandatory. String containing the user's password.
+%%  <dt>password</dt><dd>Optional. String containing the user's password.
 %%   All private keyfiles must be password protected currently.</dd>
+%%  <dt>ciphers</dt><dd>Optional. The cipher suites that should be supported.
+%%  The function ssl:cipher_suites/0 can be used to find all available
+%%  ciphers.</dd>
 %% </dl>
 %%
 %% @see ssl:listen/2
-%% @todo The password option shouldn't be mandatory.
--spec listen([{port, inet:ip_port()} | {certfile, string()}
+-spec listen([{port, inet:port_number()} | {certfile, string()}
 	| {keyfile, string()} | {password, string()}
 	| {cacertfile, string()} | {ip, inet:ip_address()}])
 	-> {ok, ssl:sslsocket()} | {error, atom()}.
@@ -68,21 +70,18 @@ listen(Opts) ->
 	{port, Port} = lists:keyfind(port, 1, Opts),
 	Backlog = proplists:get_value(backlog, Opts, 1024),
 	{certfile, CertFile} = lists:keyfind(certfile, 1, Opts),
-	{keyfile, KeyFile} = lists:keyfind(keyfile, 1, Opts),
-	{password, Password} = lists:keyfind(password, 1, Opts),
+
 	ListenOpts0 = [binary, {active, false},
 		{backlog, Backlog}, {packet, raw}, {reuseaddr, true},
-		{certfile, CertFile}, {keyfile, KeyFile}, {password, Password}],
-	ListenOpts1 =
-		case lists:keyfind(ip, 1, Opts) of
-			false -> ListenOpts0;
-			Ip -> [Ip|ListenOpts0]
-		end,
-	ListenOpts =
-		case lists:keyfind(cacertfile, 1, Opts) of
-			false -> ListenOpts1;
-			CACertFile -> [CACertFile|ListenOpts1]
-		end,
+		{certfile, CertFile}],
+	ListenOpts = lists:foldl(fun
+		({ip, _} = Ip, Acc) -> [Ip | Acc];
+		({keyfile, _} = KeyFile, Acc) -> [KeyFile | Acc];
+		({cacertfile, _} = CACertFile, Acc) -> [CACertFile | Acc];
+		({password, _} = Password, Acc) -> [Password | Acc];
+		({ciphers, _} = Ciphers, Acc) -> [Ciphers | Acc];
+		(_, Acc) -> Acc
+	end, ListenOpts0, Opts),
 	ssl:listen(Port, ListenOpts).
 
 %% @doc Accept an incoming connection on a listen socket.
@@ -131,7 +130,7 @@ controlling_process(Socket, Pid) ->
 %% @doc Return the address and port for the other end of a connection.
 %% @see ssl:peername/1
 -spec peername(ssl:sslsocket())
-	-> {ok, {inet:ip_address(), inet:ip_port()}} | {error, atom()}.
+	-> {ok, {inet:ip_address(), inet:port_number()}} | {error, atom()}.
 peername(Socket) ->
 	ssl:peername(Socket).
 
@@ -140,6 +139,13 @@ peername(Socket) ->
 -spec close(ssl:sslsocket()) -> ok.
 close(Socket) ->
 	ssl:close(Socket).
+
+%% @doc Get the local address and port of a socket
+%% @see ssl:sockname/1
+-spec sockname(ssl:sslsocket())
+	-> {ok, {inet:ip_address(), inet:port_number()}} | {error, atom()}.
+sockname(Socket) ->
+	ssl:sockname(Socket).
 
 %% Internal.
 

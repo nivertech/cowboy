@@ -1,4 +1,5 @@
 %% Copyright (c) 2011, Loïc Hoguin <essen@dev-extend.eu>
+%% Copyright (c) 2011, Anthony Ramine <nox@dev-extend.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -23,17 +24,21 @@
 	pipeline/1, raw/1, set_resp_header/1, set_resp_overwrite/1,
 	set_resp_body/1, stream_body_set_resp/1, response_as_req/1,
 	static_mimetypes_function/1, static_attribute_etag/1,
-	static_function_etag/1]). %% http.
+	static_function_etag/1, multipart/1, te_identity/1,
+	te_chunked/1, te_chunked_delayed/1]). %% http.
 -export([http_200/1, http_404/1, handler_errors/1,
 	file_200/1, file_403/1, dir_403/1, file_404/1,
 	file_400/1]). %% http and https.
--export([http_10_hostless/1]). %% misc.
--export([rest_simple/1, rest_keepalive/1]). %% rest.
+-export([http_10_hostless/1, http_10_chunkless/1]). %% misc.
+-export([rest_simple/1, rest_keepalive/1, rest_keepalive_post/1,
+	rest_nodelete/1, rest_resource_etags/1]). %% rest.
+-export([onrequest/1, onrequest_reply/1]). %% hooks.
 
 %% ct.
 
 all() ->
-	[{group, http}, {group, https}, {group, misc}, {group, rest}].
+	[{group, http}, {group, https}, {group, misc}, {group, rest},
+		{group, hooks}].
 
 groups() ->
 	BaseTests = [http_200, http_404, handler_errors,
@@ -43,10 +48,13 @@ groups() ->
 		set_resp_header, set_resp_overwrite,
 		set_resp_body, response_as_req, stream_body_set_resp,
 		static_mimetypes_function, static_attribute_etag,
-		static_function_etag] ++ BaseTests},
+		static_function_etag, multipart, te_identity, te_chunked,
+		te_chunked_delayed] ++ BaseTests},
 	{https, [], BaseTests},
-	{misc, [], [http_10_hostless]},
-	{rest, [], [rest_simple, rest_keepalive]}].
+	{misc, [], [http_10_hostless, http_10_chunkless]},
+	{rest, [], [rest_simple, rest_keepalive, rest_keepalive_post,
+		rest_nodelete, rest_resource_etags]},
+	{hooks, [], [onrequest, onrequest_reply]}].
 
 init_per_suite(Config) ->
 	application:start(inets),
@@ -74,7 +82,7 @@ init_per_group(https, Config) ->
 	application:start(public_key),
 	application:start(ssl),
 	DataDir = ?config(data_dir, Config),
-	cowboy:start_listener(https, 100,
+	{ok,_} = cowboy:start_listener(https, 100,
 		cowboy_ssl_transport, [
 			{port, Port}, {certfile, DataDir ++ "cert.pem"},
 			{keyfile, DataDir ++ "key.pem"}, {password, "cowboy"}],
@@ -83,20 +91,34 @@ init_per_group(https, Config) ->
 	[{scheme, "https"}, {port, Port}|Config1];
 init_per_group(misc, Config) ->
 	Port = 33082,
-	cowboy:start_listener(misc, 100,
+	{ok,_} = cowboy:start_listener(misc, 100,
 		cowboy_tcp_transport, [{port, Port}],
 		cowboy_http_protocol, [{dispatch, [{'_', [
+			{[<<"chunked_response">>], chunked_handler, []},
 			{[], http_handler, []}
 	]}]}]),
 	[{port, Port}|Config];
 init_per_group(rest, Config) ->
 	Port = 33083,
-	cowboy:start_listener(reset, 100,
+	{ok,_} = cowboy:start_listener(rest, 100,
 		cowboy_tcp_transport, [{port, Port}],
 		cowboy_http_protocol, [{dispatch, [{'_', [
-			{[<<"simple">>], rest_simple_resource, []}
+			{[<<"simple">>], rest_simple_resource, []},
+			{[<<"forbidden_post">>], rest_forbidden_resource, [true]},
+			{[<<"simple_post">>], rest_forbidden_resource, [false]},
+			{[<<"nodelete">>], rest_nodelete_resource, []},
+			{[<<"resetags">>], rest_resource_etags, []}
 	]}]}]),
-	[{port, Port}|Config].
+	[{scheme, "http"},{port, Port}|Config];
+init_per_group(hooks, Config) ->
+	Port = 33084,
+	{ok, _} = cowboy:start_listener(hooks, 100,
+		cowboy_tcp_transport, [{port, Port}],
+		cowboy_http_protocol, [
+			{dispatch, init_http_dispatch(Config)},
+			{onrequest, fun onrequest_hook/1}
+		]),
+	[{scheme, "http"}, {port, Port}|Config].
 
 end_per_group(https, Config) ->
 	cowboy:stop_listener(https),
@@ -144,6 +166,8 @@ init_http_dispatch(Config) ->
 			{[<<"static_function_etag">>, '...'], cowboy_http_static,
 				[{directory, ?config(static_dir, Config)},
 				 {etag, {fun static_function_etag/2, etag_data}}]},
+			{[<<"multipart">>], http_handler_multipart, []},
+			{[<<"echo">>, <<"body">>], http_handler_echo_body, []},
 			{[], http_handler, []}
 		]}
 	].
@@ -235,6 +259,24 @@ max_keepalive_loop(Socket, N) ->
 		N -> nomatch = binary:match(Data, <<"Connection: close">>)
 	end,
 	keepalive_nl_loop(Socket, N - 1).
+
+multipart(Config) ->
+	Url = build_url("/multipart", Config),
+	Body = <<
+		"This is a preamble."
+		"\r\n--OHai\r\nX-Name:answer\r\n\r\n42"
+		"\r\n--OHai\r\nServer:Cowboy\r\n\r\nIt rocks!\r\n"
+		"\r\n--OHai--"
+		"This is an epiloque."
+	>>,
+	Request = {Url, [], "multipart/x-makes-no-sense; boundary=OHai", Body},
+	{ok, {{"HTTP/1.1", 200, "OK"}, _Headers, Response}} =
+		httpc:request(post, Request, [], [{body_format, binary}]),
+	Parts = binary_to_term(Response),
+	Parts = [
+		{[{<<"X-Name">>, <<"answer">>}], <<"42">>},
+		{[{'Server', <<"Cowboy">>}], <<"It rocks!\r\n">>}
+	].
 
 nc_rand(Config) ->
 	nc_reqs(Config, "/dev/urandom").
@@ -355,7 +397,8 @@ raw(Config) ->
 		{"GET / HTTP/1.1\r\nHost: localhost", 408},
 		{"GET / HTTP/1.1\r\nHost: localhost\r\n", 408},
 		{"GET / HTTP/1.1\r\nHost: localhost\r\n\r", 408},
-		{"GET http://localhost/ HTTP/1.1\r\n\r\n", 501},
+		{"GET http://proxy/ HTTP/1.1\r\n\r\n", 400},
+		{"GET http://proxy/ HTTP/1.1\r\nHost: localhost\r\n\r\n", 200},
 		{"GET / HTTP/1.2\r\nHost: localhost\r\n\r\n", 505},
 		{"GET /init_shutdown HTTP/1.1\r\nHost: localhost\r\n\r\n", 666},
 		{"GET /long_polling HTTP/1.1\r\nHost: localhost\r\n\r\n", 102},
@@ -488,7 +531,58 @@ static_function_etag(Arguments, etag_data) ->
 	{_, _Modified} = lists:keyfind(mtime, 1, Arguments),
 	ChecksumCommand = lists:flatten(io_lib:format("sha1sum ~s", [Filepath])),
 	[Checksum|_] = string:tokens(os:cmd(ChecksumCommand), " "),
-	iolist_to_binary(Checksum).
+	{strong, iolist_to_binary(Checksum)}.
+
+te_identity(Config) ->
+	{port, Port} = lists:keyfind(port, 1, Config),
+	{ok, Socket} = gen_tcp:connect("localhost", Port,
+		[binary, {active, false}, {packet, raw}]),
+	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
+	StrLen = integer_to_list(byte_size(Body)),
+	ok = gen_tcp:send(Socket, ["GET /echo/body HTTP/1.1\r\n"
+		"Host: localhost\r\nConnection: close\r\n"
+		"Content-Length: ", StrLen, "\r\n\r\n", Body]),
+	{ok, Data} = gen_tcp:recv(Socket, 0, 6000),
+	{_, _} = binary:match(Data, Body).
+
+te_chunked(Config) ->
+	{port, Port} = lists:keyfind(port, 1, Config),
+	{ok, Socket} = gen_tcp:connect("localhost", Port,
+		[binary, {active, false}, {packet, raw}]),
+	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
+	Chunks = body_to_chunks(50, Body, []),
+	ok = gen_tcp:send(Socket, ["GET /echo/body HTTP/1.1\r\n"
+		"Host: localhost\r\nConnection: close\r\n"
+		"Transfer-Encoding: chunked\r\n\r\n", Chunks]),
+	{ok, Data} = gen_tcp:recv(Socket, 0, 6000),
+	{_, _} = binary:match(Data, Body).
+
+te_chunked_delayed(Config) ->
+	{port, Port} = lists:keyfind(port, 1, Config),
+	{ok, Socket} = gen_tcp:connect("localhost", Port,
+		[binary, {active, false}, {packet, raw}]),
+	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
+	Chunks = body_to_chunks(50, Body, []),
+	ok = gen_tcp:send(Socket, ["GET /echo/body HTTP/1.1\r\n"
+		"Host: localhost\r\nConnection: close\r\n"
+		"Transfer-Encoding: chunked\r\n\r\n"]),
+	_ = [begin ok = gen_tcp:send(Socket, Chunk), ok = timer:sleep(10) end
+		|| Chunk <- Chunks],
+	{ok, Data} = gen_tcp:recv(Socket, 0, 6000),
+	{_, _} = binary:match(Data, Body).
+
+body_to_chunks(_, <<>>, Acc) ->
+	lists:reverse([<<"0\r\n\r\n">>|Acc]);
+body_to_chunks(ChunkSize, Body, Acc) ->
+	BodySize = byte_size(Body),
+	ChunkSize2 = case BodySize < ChunkSize of
+		true -> BodySize;
+		false -> ChunkSize
+	end,
+	<< Chunk:ChunkSize2/binary, Rest/binary >> = Body,
+	ChunkSizeBin = list_to_binary(integer_to_list(ChunkSize2, 16)),
+	body_to_chunks(ChunkSize, Rest,
+		[<< ChunkSizeBin/binary, "\r\n", Chunk/binary, "\r\n" >>|Acc]).
 
 %% http and https.
 
@@ -535,11 +629,23 @@ file_400(Config) ->
 		httpc:request(build_url("/static/%2e", Config)),
 	{ok, {{"HTTP/1.1", 400, "Bad Request"}, _Headers2, _Body2}} =
 		httpc:request(build_url("/static/%2e%2e", Config)).
+
 %% misc.
 
 http_10_hostless(Config) ->
 	Packet = "GET / HTTP/1.0\r\n\r\n",
 	{Packet, 200} = raw_req(Packet, Config).
+
+http_10_chunkless(Config) ->
+	{port, Port} = lists:keyfind(port, 1, Config),
+	{ok, Socket} = gen_tcp:connect("localhost", Port,
+		[binary, {active, false}, {packet, raw}]),
+	Packet = "GET /chunked_response HTTP/1.0\r\nContent-Length: 0\r\n\r\n",
+	ok = gen_tcp:send(Socket, Packet),
+	{ok, Data} = gen_tcp:recv(Socket, 0, 6000),
+	nomatch = binary:match(Data, <<"Transfer-Encoding">>),
+	{_, _} = binary:match(Data, <<"chunked_handler\r\nworks fine!">>),
+	ok = gen_tcp:close(Socket).
 
 %% rest.
 
@@ -563,3 +669,124 @@ rest_keepalive_loop(Socket, N) ->
 	{0, 12} = binary:match(Data, <<"HTTP/1.1 200">>),
 	nomatch = binary:match(Data, <<"Connection: close">>),
 	rest_keepalive_loop(Socket, N - 1).
+
+rest_keepalive_post(Config) ->
+	{port, Port} = lists:keyfind(port, 1, Config),
+	{ok, Socket} = gen_tcp:connect("localhost", Port,
+		[binary, {active, false}, {packet, raw}]),
+	ok = rest_keepalive_post_loop(Socket, 10, forbidden_post),
+	ok = gen_tcp:close(Socket).
+
+rest_keepalive_post_loop(_Socket, 0, _) ->
+	ok;
+rest_keepalive_post_loop(Socket, N, simple_post) ->
+	ok = gen_tcp:send(Socket, "POST /simple_post HTTP/1.1\r\n"
+		"Host: localhost\r\nConnection: keep-alive\r\n"
+		"Content-Length: 5\r\nContent-Type: text/plain\r\n\r\n12345"),
+	{ok, Data} = gen_tcp:recv(Socket, 0, 6000),
+	{0, 12} = binary:match(Data, <<"HTTP/1.1 303">>),
+	nomatch = binary:match(Data, <<"Connection: close">>),
+	rest_keepalive_post_loop(Socket, N - 1, forbidden_post);
+rest_keepalive_post_loop(Socket, N, forbidden_post) ->
+	ok = gen_tcp:send(Socket, "POST /forbidden_post HTTP/1.1\r\n"
+		"Host: localhost\r\nConnection: keep-alive\r\n"
+		"Content-Length: 5\r\nContent-Type: text/plain\r\n\r\n12345"),
+	{ok, Data} = gen_tcp:recv(Socket, 0, 6000),
+	{0, 12} = binary:match(Data, <<"HTTP/1.1 403">>),
+	nomatch = binary:match(Data, <<"Connection: close">>),
+	rest_keepalive_post_loop(Socket, N - 1, simple_post).
+
+rest_nodelete(Config) ->
+	{port, Port} = lists:keyfind(port, 1, Config),
+	{ok, Socket} = gen_tcp:connect("localhost", Port,
+		[binary, {active, false}, {packet, raw}]),
+	Request = "DELETE /nodelete HTTP/1.1\r\nHost: localhost\r\n\r\n",
+	ok = gen_tcp:send(Socket, Request),
+	{ok, Data} = gen_tcp:recv(Socket, 0, 6000),
+	{0, 12} = binary:match(Data, <<"HTTP/1.1 500">>),
+	ok = gen_tcp:close(Socket).
+
+rest_resource_etags(Config) ->
+	%% The Etag header should be set to the return value of generate_etag/2.
+	fun() ->
+	%% Correct return values from generate_etag/2.
+	{Packet1, 200} = raw_resp([
+		"GET /resetags?type=tuple-weak HTTP/1.1\r\n",
+		"Host: localhost\r\n", "Connection: close\r\n", "\r\n"], Config),
+	{_,_} = binary:match(Packet1, <<"ETag: W/\"etag-header-value\"\r\n">>),
+	{Packet2, 200} = raw_resp([
+		"GET /resetags?type=tuple-strong HTTP/1.1\r\n",
+		"Host: localhost\r\n", "Connection: close\r\n", "\r\n"], Config),
+	{_,_} = binary:match(Packet2, <<"ETag: \"etag-header-value\"\r\n">>),
+	%% Backwards compatible return values from generate_etag/2.
+	{Packet3, 200} = raw_resp([
+		"GET /resetags?type=binary-weak-quoted HTTP/1.1\r\n",
+		"Host: localhost\r\n", "Connection: close\r\n", "\r\n"], Config),
+	{_,_} = binary:match(Packet3, <<"ETag: W/\"etag-header-value\"\r\n">>),
+	{Packet4, 200} = raw_resp([
+		"GET /resetags?type=binary-strong-quoted HTTP/1.1\r\n",
+		"Host: localhost\r\n", "Connection: close\r\n", "\r\n"], Config),
+	{_,_} = binary:match(Packet4, <<"ETag: \"etag-header-value\"\r\n">>),
+	%% Invalid return values from generate_etag/2.
+	{_Packet5, 500} = raw_resp([
+		"GET /resetags?type=binary-strong-unquoted HTTP/1.1\r\n",
+		"Host: localhost\r\n", "Connection: close\r\n", "\r\n"], Config),
+	{_Packet6, 500} = raw_resp([
+		"GET /resetags?type=binary-weak-unquoted HTTP/1.1\r\n",
+		"Host: localhost\r\n", "Connection: close\r\n", "\r\n"], Config)
+	end(),
+
+	%% The return value of generate_etag/2 should match the request header.
+	fun() ->
+	%% Correct return values from generate_etag/2.
+	{_Packet1, 304} = raw_resp([
+		"GET /resetags?type=tuple-weak HTTP/1.1\r\n",
+		"Host: localhost\r\n", "Connection: close\r\n",
+		"If-None-Match: W/\"etag-header-value\"\r\n", "\r\n"], Config),
+	{_Packet2, 304} = raw_resp([
+		"GET /resetags?type=tuple-strong HTTP/1.1\r\n",
+		"Host: localhost\r\n", "Connection: close\r\n",
+		"If-None-Match: \"etag-header-value\"\r\n", "\r\n"], Config),
+	%% Backwards compatible return values from generate_etag/2.
+	{_Packet3, 304} = raw_resp([
+		"GET /resetags?type=binary-weak-quoted HTTP/1.1\r\n",
+		"Host: localhost\r\n", "Connection: close\r\n",
+		"If-None-Match: W/\"etag-header-value\"\r\n", "\r\n"], Config),
+	{_Packet4, 304} = raw_resp([
+		"GET /resetags?type=binary-strong-quoted HTTP/1.1\r\n",
+		"Host: localhost\r\n", "Connection: close\r\n",
+		"If-None-Match: \"etag-header-value\"\r\n", "\r\n"], Config)
+	end().
+
+onrequest(Config) ->
+	{port, Port} = lists:keyfind(port, 1, Config),
+	{ok, Socket} = gen_tcp:connect("localhost", Port,
+		[binary, {active, false}, {packet, raw}]),
+	ok = gen_tcp:send(Socket, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+	{ok, Data} = gen_tcp:recv(Socket, 0, 6000),
+	{_, _} = binary:match(Data, <<"Server: Serenity">>),
+	{_, _} = binary:match(Data, <<"http_handler">>),
+	gen_tcp:close(Socket).
+
+onrequest_reply(Config) ->
+	{port, Port} = lists:keyfind(port, 1, Config),
+	{ok, Socket} = gen_tcp:connect("localhost", Port,
+		[binary, {active, false}, {packet, raw}]),
+	ok = gen_tcp:send(Socket, "GET /?reply=1 HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+	{ok, Data} = gen_tcp:recv(Socket, 0, 6000),
+	{_, _} = binary:match(Data, <<"Server: Cowboy">>),
+	nomatch = binary:match(Data, <<"http_handler">>),
+	{_, _} = binary:match(Data, <<"replied!">>),
+	gen_tcp:close(Socket).
+
+onrequest_hook(Req) ->
+	case cowboy_http_req:qs_val(<<"reply">>, Req) of
+		{undefined, Req2} ->
+			{ok, Req3} = cowboy_http_req:set_resp_header(
+				'Server', <<"Serenity">>, Req2),
+			Req3;
+		{_, Req2} ->
+			{ok, Req3} = cowboy_http_req:reply(
+				200, [], <<"replied!">>, Req2),
+			Req3
+	end.

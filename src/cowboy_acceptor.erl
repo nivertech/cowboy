@@ -16,7 +16,7 @@
 -module(cowboy_acceptor).
 
 -export([start_link/9]). %% API.
--export([acceptor/11]). %% Internal.
+-export([acceptor/12]). %% Internal.
 
 %% API.
 
@@ -27,18 +27,18 @@ start_link(LSocket, Transport, Protocol, Opts,
 		MaxConns, MaxConnPerPeriod, ConnPeriodMilliSec,
         ListenerPid, ReqsSup) ->
 	Pid = spawn_link(?MODULE, acceptor,
-		[LSocket, Transport, Protocol, Opts, 
+		[LSocket, Transport, Protocol, Opts, 1,
          MaxConns, MaxConnPerPeriod, ConnPeriodMilliSec * 1000, now(), 0,
          ListenerPid, ReqsSup]),
 	{ok, Pid}.
 
 %% Internal.
 
--spec acceptor(inet:socket(), module(), module(), any(),
+-spec acceptor(inet:socket(), module(), module(), any(), non_neg_integer(),
 	non_neg_integer(), non_neg_integer(), non_neg_integer(), 
     {non_neg_integer(), non_neg_integer(), non_neg_integer()},
     non_neg_integer(), pid(), pid()) -> no_return().
-acceptor(LSocket, Transport, Protocol, Opts, 
+acceptor(LSocket, Transport, Protocol, Opts, OptsVsn,
         MaxConns, MaxConnPerPeriod, ConnPeriodMicroSec, LastPeriodStart, ConnInCurrentPeriod, 
         ListenerPid, ReqsSup) ->
     {LastPeriodStart2, ConnInCurrentPeriod2} = case Transport:accept(LSocket, 2000) of
@@ -67,12 +67,14 @@ acceptor(LSocket, Transport, Protocol, Opts,
                     end
             end;
 		{error, timeout} ->
+            % cowboy_listener:check_upgrades(ListenerPid, OptsVsn), - calls to cowboy_listener disabled for efficency reasons
 			{LastPeriodStart, ConnInCurrentPeriod};
 		{error, _Reason} ->
 			%% @todo Probably do something here. If the socket was closed,
 			%%       we may want to try and listen again on the port?
 			{LastPeriodStart, ConnInCurrentPeriod}
 	end,
+    % note: in new cowboy_listener to some kind of a protocol upgrade through listener, which would require us to update code here. since listener is disabled, i'm leaving this disabled here as well
 	?MODULE:acceptor(LSocket, Transport, Protocol, Opts,
 		MaxConns, MaxConnPerPeriod, ConnPeriodMicroSec, LastPeriodStart2, ConnInCurrentPeriod2, ListenerPid, ReqsSup).
 
@@ -82,8 +84,8 @@ accept_connection(CSocket, Transport, Protocol, Opts, MaxConns, ListenerPid, Req
     {ok, Pid} = supervisor:start_child(ReqsSup,
         [ListenerPid, CSocket, Transport, Protocol, Opts]),
     Transport:controlling_process(CSocket, Pid),
-    %{ok, NbConns} = cowboy_listener:add_connection(ListenerPid,
-    %    default, Pid),
+    %{ok, NbConns} = cowboy_listener:add_connection(ListenerPid, - calls to cowboy_listener disabled for efficency reasons
+    %    default, Pid, OptsVsn),
     Pid ! {shoot, ListenerPid},
     limit_reqs(ListenerPid, 0, MaxConns).
                                
@@ -93,4 +95,4 @@ limit_reqs(_ListenerPid, NbConns, MaxConns) when NbConns =< MaxConns ->
 	ok;
 limit_reqs(_ListenerPid, _NbConns, _MaxConns) ->
     ok.
-	%cowboy_listener:wait(ListenerPid, default, MaxConns).
+	%cowboy_listener:wait(ListenerPid, default, MaxConns). - calls to cowboy_listener disabled for efficency reasons

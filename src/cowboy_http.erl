@@ -17,16 +17,43 @@
 -module(cowboy_http).
 
 %% Parsing.
--export([list/2, nonempty_list/2, content_type/1,
-	media_range/2, conneg/2, language_range/2, entity_tag_match/1,
+-export([list/2, nonempty_list/2, content_type/1, media_range/2, conneg/2,
+	language_range/2, entity_tag_match/1, expectation/2, params/2,
 	http_date/1, rfc1123_date/1, rfc850_date/1, asctime_date/1,
-	digits/1, token/2, token_ci/2, quoted_string/2]).
+	whitespace/2, digits/1, token/2, token_ci/2, quoted_string/2]).
+
+%% Decoding.
+-export([te_chunked/2, te_identity/2, ce_identity/1]).
 
 %% Interpretation.
 -export([connection_to_atom/1, urldecode/1, urldecode/2, urlencode/1,
-	urlencode/2]).
+	urlencode/2, x_www_form_urlencoded/2]).
 
--include("include/http.hrl").
+-type method() :: 'OPTIONS' | 'GET' | 'HEAD'
+	| 'POST' | 'PUT' | 'DELETE' | 'TRACE' | binary().
+-type uri() :: '*' | {absoluteURI, http | https, Host::binary(),
+	Port::integer() | undefined, Path::binary()}
+	| {scheme, Scheme::binary(), binary()}
+	| {abs_path, binary()} | binary().
+-type version() :: {Major::non_neg_integer(), Minor::non_neg_integer()}.
+-type header() :: 'Cache-Control' | 'Connection' | 'Date' | 'Pragma'
+	| 'Transfer-Encoding' | 'Upgrade' | 'Via' | 'Accept' | 'Accept-Charset'
+	| 'Accept-Encoding' | 'Accept-Language' | 'Authorization' | 'From' | 'Host'
+	| 'If-Modified-Since' | 'If-Match' | 'If-None-Match' | 'If-Range'
+	| 'If-Unmodified-Since' | 'Max-Forwards' | 'Proxy-Authorization' | 'Range'
+	| 'Referer' | 'User-Agent' | 'Age' | 'Location' | 'Proxy-Authenticate'
+	| 'Public' | 'Retry-After' | 'Server' | 'Vary' | 'Warning'
+	| 'Www-Authenticate' | 'Allow' | 'Content-Base' | 'Content-Encoding'
+	| 'Content-Language' | 'Content-Length' | 'Content-Location'
+	| 'Content-Md5' | 'Content-Range' | 'Content-Type' | 'Etag'
+	| 'Expires' | 'Last-Modified' | 'Accept-Ranges' | 'Set-Cookie'
+	| 'Set-Cookie2' | 'X-Forwarded-For' | 'Cookie' | 'Keep-Alive'
+	| 'Proxy-Connection' | binary().
+-type headers() :: [{header(), iodata()}].
+-type status() :: non_neg_integer() | binary().
+
+-export_type([method/0, uri/0, version/0, header/0, headers/0, status/0]).
+
 -include_lib("eunit/include/eunit.hrl").
 
 %% Parsing.
@@ -73,33 +100,9 @@ list(Data, Fun, Acc) ->
 content_type(Data) ->
 	media_type(Data,
 		fun (Rest, Type, SubType) ->
-				content_type_params(Rest,
-					fun (Params) -> {Type, SubType, Params} end, [])
-		end).
-
--spec content_type_params(binary(), fun(), list({binary(), binary()}))
-	-> any().
-content_type_params(Data, Fun, Acc) ->
-	whitespace(Data,
-		fun (<< $;, Rest/binary >>) -> content_type_param(Rest, Fun, Acc);
-			(<<>>) -> Fun(lists:reverse(Acc));
-			(_Rest) -> {error, badarg}
-		end).
-
--spec content_type_param(binary(), fun(), list({binary(), binary()}))
-	-> any().
-content_type_param(Data, Fun, Acc) ->
-	whitespace(Data,
-		fun (Rest) ->
-				token_ci(Rest,
-					fun (_Rest2, <<>>) -> {error, badarg};
-						(<< $=, Rest2/binary >>, Attr) ->
-							word(Rest2,
-								fun (Rest3, Value) ->
-										content_type_params(Rest3, Fun,
-											[{Attr, Value}|Acc])
-								end);
-						(_Rest2, _Attr) -> {error, badarg}
+				params(Rest,
+					fun (<<>>, Params) -> {Type, SubType, Params};
+						(_Rest2, _) -> {error, badarg}
 					end)
 		end).
 
@@ -153,6 +156,13 @@ media_type(Data, Fun) ->
 		fun (_Rest, <<>>) -> {error, badarg};
 			(<< $/, Rest/binary >>, Type) ->
 				token_ci(Rest,
+					fun (_Rest2, <<>>) -> {error, badarg};
+						(Rest2, SubType) -> Fun(Rest2, Type, SubType)
+					end);
+			%% This is a non-strict parsing clause required by some user agents
+			%% that use * instead of */* in the list of media types.
+			(Rest, <<"*">> = Type) ->
+				token_ci(<<"*", Rest/binary>>,
 					fun (_Rest2, <<>>) -> {error, badarg};
 						(Rest2, SubType) -> Fun(Rest2, Type, SubType)
 					end);
@@ -292,6 +302,50 @@ opaque_tag(Data, Fun, Strength) ->
 	quoted_string(Data,
 		fun (_Rest, <<>>) -> {error, badarg};
 			(Rest, OpaqueTag) -> Fun(Rest, {Strength, OpaqueTag})
+		end).
+
+%% @doc Parse an expectation.
+-spec expectation(binary(), fun()) -> any().
+expectation(Data, Fun) ->
+	token_ci(Data,
+		fun (_Rest, <<>>) -> {error, badarg};
+			(<< $=, Rest/binary >>, Expectation) ->
+				word(Rest,
+					fun (Rest2, ExtValue) ->
+						params(Rest2, fun (Rest3, ExtParams) ->
+							Fun(Rest3, {Expectation, ExtValue, ExtParams})
+						end)
+					end);
+			(Rest, Expectation) ->
+				Fun(Rest, Expectation)
+		end).
+
+%% @doc Parse a list of parameters (a=b;c=d).
+-spec params(binary(), fun()) -> any().
+params(Data, Fun) ->
+	params(Data, Fun, []).
+
+-spec params(binary(), fun(), [{binary(), binary()}]) -> any().
+params(Data, Fun, Acc) ->
+	whitespace(Data,
+		fun (<< $;, Rest/binary >>) -> param(Rest, Fun, Acc);
+			(Rest) -> Fun(Rest, lists:reverse(Acc))
+		end).
+
+-spec param(binary(), fun(), [{binary(), binary()}]) -> any().
+param(Data, Fun, Acc) ->
+	whitespace(Data,
+		fun (Rest) ->
+				token_ci(Rest,
+					fun (_Rest2, <<>>) -> {error, badarg};
+						(<< $=, Rest2/binary >>, Attr) ->
+							word(Rest2,
+								fun (Rest3, Value) ->
+										params(Rest3, Fun,
+											[{Attr, Value}|Acc])
+								end);
+						(_Rest2, _Attr) -> {error, badarg}
+					end)
 		end).
 
 %% @doc Parse an HTTP date (RFC1123, RFC850 or asctime date).
@@ -632,6 +686,9 @@ quoted_string(<< C, Rest/binary >>, Fun, Acc) ->
 -spec qvalue(binary(), fun()) -> any().
 qvalue(<< $0, $., Rest/binary >>, Fun) ->
 	qvalue(Rest, Fun, 0, 100);
+%% Some user agents use q=.x instead of q=0.x
+qvalue(<< $., Rest/binary >>, Fun) ->
+	qvalue(Rest, Fun, 0, 100);
 qvalue(<< $0, Rest/binary >>, Fun) ->
 	Fun(Rest, 0);
 qvalue(<< $1, $., $0, $0, $0, Rest/binary >>, Fun) ->
@@ -654,6 +711,51 @@ qvalue(<< C, Rest/binary >>, Fun, Q, M)
 qvalue(Data, Fun, Q, _M) ->
 	Fun(Data, Q).
 
+%% Decoding.
+
+%% @doc Decode a stream of chunks.
+-spec te_chunked(binary(), {non_neg_integer(), non_neg_integer()})
+	-> more | {ok, binary(), {non_neg_integer(), non_neg_integer()}}
+	| {ok, binary(), binary(),  {non_neg_integer(), non_neg_integer()}}
+	| {done, non_neg_integer(), binary()} | {error, badarg}.
+te_chunked(<<>>, _) ->
+	more;
+te_chunked(<< "0\r\n\r\n", Rest/binary >>, {0, Streamed}) ->
+	{done, Streamed, Rest};
+te_chunked(Data, {0, Streamed}) ->
+	%% @todo We are expecting an hex size, not a general token.
+	token(Data,
+		fun (Rest, _) when byte_size(Rest) < 4 ->
+				more;
+			(<< "\r\n", Rest/binary >>, BinLen) ->
+				Len = list_to_integer(binary_to_list(BinLen), 16),
+				te_chunked(Rest, {Len, Streamed});
+			(_, _) ->
+				{error, badarg}
+		end);
+te_chunked(Data, {ChunkRem, Streamed}) when byte_size(Data) >= ChunkRem + 2 ->
+	<< Chunk:ChunkRem/binary, "\r\n", Rest/binary >> = Data,
+	{ok, Chunk, Rest, {0, Streamed + byte_size(Chunk)}};
+te_chunked(Data, {ChunkRem, Streamed}) ->
+	Size = byte_size(Data),
+	{ok, Data, {ChunkRem - Size, Streamed + Size}}.
+
+%% @doc Decode an identity stream.
+-spec te_identity(binary(), {non_neg_integer(), non_neg_integer()})
+	-> {ok, binary(), {non_neg_integer(), non_neg_integer()}}
+	| {done, binary(), non_neg_integer(), binary()}.
+te_identity(Data, {Streamed, Total})
+		when Streamed + byte_size(Data) < Total ->
+	{ok, Data, {Streamed + byte_size(Data), Total}};
+te_identity(Data, {Streamed, Total}) ->
+	Size = Total - Streamed,
+	<< Data2:Size/binary, Rest/binary >> = Data,
+	{done, Data2, Total, Rest}.
+
+%% @doc Decode an identity content.
+-spec ce_identity(binary()) -> {ok, binary()}.
+ce_identity(Data) ->
+	{ok, Data}.
 
 %% Interpretation.
 
@@ -755,6 +857,16 @@ tohexu(C) when C < 17 -> $A + C - 10.
 tohexl(C) when C < 10 -> $0 + C;
 tohexl(C) when C < 17 -> $a + C - 10.
 
+-spec x_www_form_urlencoded(binary(), fun((binary()) -> binary())) ->
+		list({binary(), binary() | true}).
+x_www_form_urlencoded(<<>>, _URLDecode) ->
+	[];
+x_www_form_urlencoded(Qs, URLDecode) ->
+	Tokens = binary:split(Qs, <<"&">>, [global, trim]),
+	[case binary:split(Token, <<"=">>) of
+		[Token] -> {URLDecode(Token), true};
+		[Name, Value] -> {URLDecode(Name), URLDecode(Value)}
+	end || Token <- Tokens].
 
 %% Tests.
 
@@ -840,6 +952,13 @@ media_range_list_test_() ->
 				[{<<"level">>, <<"1">>}, {<<"quoted">>, <<"hi hi hi">>}]}, 123,
 				[<<"standalone">>, {<<"complex">>, <<"gits">>}]},
 			{{<<"text">>, <<"plain">>, []}, 1000, []}
+		]},
+		{<<"text/html, image/gif, image/jpeg, *; q=.2, */*; q=.2">>, [
+			{{<<"text">>, <<"html">>, []}, 1000, []},
+			{{<<"image">>, <<"gif">>, []}, 1000, []},
+			{{<<"image">>, <<"jpeg">>, []}, 1000, []},
+			{{<<"*">>, <<"*">>, []}, 200, []},
+			{{<<"*">>, <<"*">>, []}, 200, []}
 		]}
 	],
 	[{V, fun() -> R = list(V, fun media_range/2) end} || {V, R} <- Tests].
@@ -921,6 +1040,22 @@ digits_test_() ->
 		{<<"1337">>, 1337}
 	],
 	[{V, fun() -> R = digits(V) end} || {V, R} <- Tests].
+
+x_www_form_urlencoded_test_() ->
+	%% {Qs, Result}
+	Tests = [
+		{<<"">>, []},
+		{<<"a=b">>, [{<<"a">>, <<"b">>}]},
+		{<<"aaa=bbb">>, [{<<"aaa">>, <<"bbb">>}]},
+		{<<"a&b">>, [{<<"a">>, true}, {<<"b">>, true}]},
+		{<<"a=b&c&d=e">>, [{<<"a">>, <<"b">>},
+			{<<"c">>, true}, {<<"d">>, <<"e">>}]},
+		{<<"a=b=c=d=e&f=g">>, [{<<"a">>, <<"b=c=d=e">>}, {<<"f">>, <<"g">>}]},
+		{<<"a+b=c+d">>, [{<<"a b">>, <<"c d">>}]}
+	],
+	URLDecode = fun urldecode/1,
+	[{Qs, fun() -> R = x_www_form_urlencoded(
+		Qs, URLDecode) end} || {Qs, R} <- Tests].
 
 urldecode_test_() ->
 	U = fun urldecode/2,
