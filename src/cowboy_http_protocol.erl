@@ -143,6 +143,13 @@ request({http_request, Method, '*', Version},
 		connection=ConnAtom, pid=self(), method=Method, version=Version,
 		path='*', raw_path= <<"*">>, raw_qs= <<>>, urldecode=URLDec}, State);
 request({http_request, _Method, _URI, _Version}, State) ->
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_http_protocol  - rejecting request with 501, method is ~p, URI is ~p, Version is ~p~n",
+                                  [_Method, _URI, _Version]);
+        false ->
+            ok
+    end,
 	error_terminate(501, State);
 request({http_error, <<"\r\n">>},
 		State=#state{req_empty_lines=N, max_empty_lines=N}) ->
