@@ -38,7 +38,7 @@ start_link(LSocket, Transport, Protocol, Opts,
 	non_neg_integer(), non_neg_integer(), non_neg_integer(), 
     {non_neg_integer(), non_neg_integer(), non_neg_integer()},
     non_neg_integer(), pid(), pid()) -> no_return().
-acceptor(LSocket, Transport, Protocol, Opts, _OptsVsn,
+acceptor(LSocket, Transport, Protocol, Opts, OptsVsn,
         MaxConns, MaxConnPerPeriod, ConnPeriodMicroSec, LastPeriodStart, ConnInCurrentPeriod, 
         ListenerPid, ReqsSup) ->
     {LastPeriodStart2, ConnInCurrentPeriod2} = case Transport:accept(LSocket, 2000) of
@@ -75,7 +75,7 @@ acceptor(LSocket, Transport, Protocol, Opts, _OptsVsn,
 			{LastPeriodStart, ConnInCurrentPeriod}
 	end,
     % note: in new cowboy_listener to some kind of a protocol upgrade through listener, which would require us to update code here. since listener is disabled, i'm leaving this disabled here as well
-	?MODULE:acceptor(LSocket, Transport, Protocol, Opts,
+	?MODULE:acceptor(LSocket, Transport, Protocol, Opts, OptsVsn,
 		MaxConns, MaxConnPerPeriod, ConnPeriodMicroSec, LastPeriodStart2, ConnInCurrentPeriod2, ListenerPid, ReqsSup).
 
 -spec accept_connection(inet:socket(), module(), module(), any(), non_neg_integer(),
