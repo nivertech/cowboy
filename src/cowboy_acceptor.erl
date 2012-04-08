@@ -45,7 +45,7 @@ acceptor(LSocket, Transport, Protocol, Opts, OptsVsn,
         {ok, CSocket} ->
             case MaxConnPerPeriod of
                 0 ->
-                    accept_connection(CSocket, Transport, Protocol, Opts, MaxConns, 
+                    accept_connection(CSocket, Transport, Protocol, Opts,
                             ListenerPid, ReqsSup),
                     {ok, {0, 0, 0}, 0};
                 _ ->
@@ -56,8 +56,7 @@ acceptor(LSocket, Transport, Protocol, Opts, OptsVsn,
                             Transport:close(CSocket),
                             {ok, LastPeriodStart, ConnInCurrentPeriod};
                         false ->                    
-                            accept_connection(CSocket, Transport, Protocol, Opts, MaxConns,
-                                    ListenerPid, ReqsSup),
+                            accept_connection(CSocket, Transport, Protocol, Opts, ListenerPid, ReqsSup),
                             case NewPeriod of 
                                 true  -> 
                                     {ok, Now, 1};
@@ -83,9 +82,8 @@ acceptor(LSocket, Transport, Protocol, Opts, OptsVsn,
 		%		Opts2, OptsVsn2, ListenerPid, ReqsSup)
 	end.
 
--spec accept_connection(inet:socket(), module(), module(), any(), non_neg_integer(),
-    pid(), pid()) -> ok.
-accept_connection(CSocket, Transport, Protocol, Opts, MaxConns, ListenerPid, ReqsSup) ->
+-spec accept_connection(inet:socket(), module(), module(), any(), pid(), pid()) -> ok.
+accept_connection(CSocket, Transport, Protocol, Opts, ListenerPid, ReqsSup) ->
     {ok, Pid} = supervisor:start_child(ReqsSup,
         [ListenerPid, CSocket, Transport, Protocol, Opts]),
     Transport:controlling_process(CSocket, Pid),
