@@ -38,7 +38,7 @@ start_link(LSocket, Transport, Protocol, Opts,
 	non_neg_integer(), non_neg_integer(), non_neg_integer(), 
     {non_neg_integer(), non_neg_integer(), non_neg_integer()},
     non_neg_integer(), pid(), pid()) -> no_return().
-acceptor(LSocket, Transport, Protocol, Opts, OptsVsn,
+acceptor(LSocket, Transport, Protocol, Opts, _OptsVsn,
         MaxConns, MaxConnPerPeriod, ConnPeriodMicroSec, LastPeriodStart, ConnInCurrentPeriod, 
         ListenerPid, ReqsSup) ->
     {LastPeriodStart2, ConnInCurrentPeriod2} = case Transport:accept(LSocket, 2000) of
