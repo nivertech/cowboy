@@ -98,7 +98,15 @@ parse_request(State=#state{buffer=Buffer, max_line_length=MaxLength}) ->
 		{more, _Length} when byte_size(Buffer) > MaxLength ->
 			error_terminate(413, State);
 		{more, _Length} -> wait_request(State);
-		{error, _Reason} -> error_terminate(400, State)
+		{error, _Reason} -> 
+            case config_dynamic:is_debug_connection() of
+                true ->
+                    error_logger:info_msg("cowboy_http_protocol:parse_request - decode_packet for ~p returned ~p~n",
+                                          [Buffer, {error, _Reason}]);
+                false ->
+                    ok
+            end,
+            error_terminate(400, State)
 	end.
 
 -spec wait_request(#state{}) -> ok.
@@ -138,10 +146,23 @@ request({http_request, _Method, _URI, _Version}, State) ->
 	error_terminate(501, State);
 request({http_error, <<"\r\n">>},
 		State=#state{req_empty_lines=N, max_empty_lines=N}) ->
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_http_protocol:request - Too many empty lines (~p lines) in request~n", [N]);
+        false ->
+            ok
+    end,
 	error_terminate(400, State);
 request({http_error, <<"\r\n">>}, State=#state{req_empty_lines=N}) ->
 	parse_request(State#state{req_empty_lines=N + 1});
 request(_Any, State) ->
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_http_protocol:request - unexpected input-state pair~ninput: ~p~nstate: ~p~n", 
+                                  [_Any, State]);
+        false ->
+            ok
+    end,
 	error_terminate(400, State).
 
 -spec parse_header(#http_req{}, #state{}) -> ok.
@@ -151,7 +172,15 @@ parse_header(Req, State=#state{buffer=Buffer, max_line_length=MaxLength}) ->
 		{more, _Length} when byte_size(Buffer) > MaxLength ->
 			error_terminate(413, State);
 		{more, _Length} -> wait_header(Req, State);
-		{error, _Reason} -> error_terminate(400, State)
+		{error, _Reason} -> 
+            case config_dynamic:is_debug_connection() of
+                true ->
+                    error_logger:info_msg("cowboy_http_protocol:parse_header - decode_packet for ~p returned ~p~n",
+                                          [Buffer, {error, _Reason}]);
+                false ->
+                    ok
+            end,
+            error_terminate(400, State)
 	end.
 
 -spec wait_header(#http_req{}, #state{}) -> ok.
@@ -180,6 +209,13 @@ header({http_header, _I, 'Host', _R, RawHost}, Req=#http_req{
 				host=Host, raw_host=RawHost3, port=Port,
 				headers=[{'Host', RawHost3}|Req#http_req.headers]}, State);
 		{'EXIT', _Reason} ->
+            case config_dynamic:is_debug_connection() of
+                true ->
+                    error_logger:info_msg("cowboy_http_protocol:header - cowboy_dispatcher:split_host(~p) returned ~p~n",
+                                          [RawHost2, {'EXIT', _Reason}]);
+                false ->
+                    ok
+            end,
 			error_terminate(400, State)
 	end;
 %% Ignore Host headers if we already have it.
@@ -198,6 +234,12 @@ header({http_header, _I, Field, _R, Value}, Req, State) ->
 		State);
 %% The Host header is required in HTTP/1.1.
 header(http_eoh, #http_req{version={1, 1}, host=undefined}, State) ->
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_http_protocol:header - Host header is required in HTTP/1.1~n");
+        false ->
+            ok
+    end,
 	error_terminate(400, State);
 %% It is however optional in HTTP/1.0.
 header(http_eoh, Req=#http_req{version={1, 0}, transport=Transport,
@@ -208,6 +250,16 @@ header(http_eoh, Req=#http_req{version={1, 0}, transport=Transport,
 header(http_eoh, Req, State=#state{buffer=Buffer}) ->
 	onrequest(Req#http_req{buffer=Buffer}, State#state{buffer= <<>>});
 header(_Any, _Req, State) ->
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_http_protocol:header - unexpected input-request-state triplet~n"
+                                  "input - ~p~n"
+                                  "req - ~p~n"
+                                  "state - ~p~n",
+                                  [_Any, _Req, State]);
+        false ->
+            ok
+    end,
 	error_terminate(400, State).
 
 %% Call the global onrequest callback. The callback can send a reply,
@@ -232,6 +284,12 @@ dispatch(Req=#http_req{host=Host, path=Path},
 			handler_init(Req#http_req{host_info=HostInfo, path_info=PathInfo,
 				bindings=Binds}, State#state{handler={Handler, Opts}});
 		{error, notfound, host} ->
+            case config_dynamic:is_debug_connection() of
+                true ->
+                    error_logger:info_msg("cowboy_http_protocol:dispatch - cowboy_dispacter:match(~p, ~p, ~p) returned {error, notfound, host}~n", [Host, Path, Dispatch]);
+                false ->
+                    ok
+            end,
 			error_terminate(400, State);
 		{error, notfound, path} ->
 			error_terminate(404, State)
@@ -426,6 +484,12 @@ ensure_response(#http_req{socket=Socket, transport=Transport,
 %% Only send an error reply if there is no resp_sent message.
 -spec error_terminate(cowboy_http:status(), #state{}) -> ok.
 error_terminate(Code, State=#state{socket=Socket, transport=Transport}) ->
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_http_protocol:error_terminate(~p, ~p)~n", [Code, State]);
+        false ->
+            ok
+    end,
 	receive
 		{cowboy_http_req, resp_sent} -> ok
 	after 0 ->
