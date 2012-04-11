@@ -233,6 +233,7 @@ parse_header(Name, Req=#http_req{p_headers=PHeaders}) ->
 -spec parse_header_default(cowboy_http:header()) -> any().
 parse_header_default('Connection') -> [];
 parse_header_default('Transfer-Encoding') -> [<<"identity">>];
+parse_header_default(<<"Sec-Websocket-Protocol">>) -> [];
 parse_header_default(_Name) -> undefined.
 
 %% @doc Semantically parse headers.
@@ -300,6 +301,11 @@ parse_header(Name, Req, Default) when Name =:= 'Transfer-Encoding' ->
 		end);
 parse_header(Name, Req, Default) when Name =:= 'Upgrade' ->
 	parse_header(Name, Req, Default,
+		fun (Value) ->
+			cowboy_http:nonempty_list(Value, fun cowboy_http:token_ci/2)
+		end);
+parse_header(Name, Req, Default) when Name =:= <<"Sec-Websocket-Protocol">> ->
+    parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:nonempty_list(Value, fun cowboy_http:token_ci/2)
 		end);
