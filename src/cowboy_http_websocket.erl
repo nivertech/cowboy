@@ -173,17 +173,12 @@ websocket_handshake(State=#state{version=0, origin=Origin,
 		transport=Transport, raw_host=Host, port=Port,
 		raw_path=Path, raw_qs=QS}, HandlerState) ->
 	Location = hixie76_location(Transport:name(), Host, Port, Path, QS),
-    {Subprotocols, Req2} = cowboy_http_req:parse_header(<<"Sec-Websocket-Protocol">>, Req), %% TODO: this is not a correct implementation, as it always selects the first sub-protocol, it's just filler until cowboy team handles this
-    SubprotocolHeader = case Subprotocols  of
-        [] -> [];
-        [Subprotocol|_] -> [{<<"Sec-Websocket-Protocol">>, Subprotocol}]
-    end,
-	{ok, Req3} = cowboy_http_req:upgrade_reply(
+	{ok, Req2} = cowboy_http_req:upgrade_reply(
 		<<"101 WebSocket Protocol Handshake">>,
-		SubprotocolHeader ++ [{<<"Upgrade">>, <<"WebSocket">>},
-		                      {<<"Sec-Websocket-Location">>, Location},
-		                      {<<"Sec-Websocket-Origin">>, Origin}],
-		Req2#http_req{resp_state=waiting}),
+		[{<<"Upgrade">>, <<"WebSocket">>},
+         {<<"Sec-Websocket-Location">>, Location},
+         {<<"Sec-Websocket-Origin">>, Origin}],
+		Req#http_req{resp_state=waiting}),
 	%% Flush the resp_sent message before moving on.
 	receive {cowboy_http_req, resp_sent} -> ok after 0 -> ok end,
 	%% We replied with a proper response. Proxies should be happy enough,
@@ -194,7 +189,7 @@ websocket_handshake(State=#state{version=0, origin=Origin,
 	%% of what's in the buffer.
 	{ok, Req4} = cowboy_http_req:init_stream(
 		fun cowboy_http:te_identity/2, {0, 8},
-		fun cowboy_http:ce_identity/1, Req3),
+		fun cowboy_http:ce_identity/1, Req2),
 	case cowboy_http_req:body(Req4) of
 		{ok, Key3, Req5} ->
 			Challenge = hixie76_challenge(Key1, Key2, Key3),
@@ -206,20 +201,15 @@ websocket_handshake(State=#state{version=0, origin=Origin,
 	end;
 websocket_handshake(State=#state{challenge=Challenge},
 		Req=#http_req{transport=Transport}, HandlerState) ->
-    {Subprotocols, Req2} = cowboy_http_req:parse_header(<<"Sec-Websocket-Protocol">>, Req), %% TODO: this is not a correct implementation, as it always selects the first sub-protocol, it's just filler until cowboy team handles this
-    SubprotocolHeader = case Subprotocols  of
-        [] -> [];
-        [Subprotocol|_] -> [{<<"Sec-Websocket-Protocol">>, Subprotocol}]
-    end,
-	{ok, Req3} = cowboy_http_req:upgrade_reply(
+	{ok, Req2} = cowboy_http_req:upgrade_reply(
 		101,
-		SubprotocolHeader ++ [{<<"Upgrade">>, <<"websocket">>},
-                              {<<"Sec-Websocket-Accept">>, Challenge}],
-		Req2#http_req{resp_state=waiting}),
+		[{<<"Upgrade">>, <<"websocket">>},
+         {<<"Sec-Websocket-Accept">>, Challenge}],
+		Req#http_req{resp_state=waiting}),
 	%% Flush the resp_sent message before moving on.
 	receive {cowboy_http_req, resp_sent} -> ok after 0 -> ok end,
 	handler_before_loop(State#state{messages=Transport:messages()},
-		Req3, HandlerState, <<>>).
+		Req2, HandlerState, <<>>).
 
 -spec handler_before_loop(#state{}, #http_req{}, any(), binary()) -> closed.
 handler_before_loop(State=#state{hibernate=true},
