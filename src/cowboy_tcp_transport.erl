@@ -80,13 +80,27 @@ accept(LSocket, Timeout) ->
 -spec recv(inet:socket(), non_neg_integer(), timeout())
 	-> {ok, any()} | {error, closed | atom()}.
 recv(Socket, Length, Timeout) ->
-	gen_tcp:recv(Socket, Length, Timeout).
+	RecvResult = gen_tcp:recv(Socket, Length, Timeout),
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_tcp_transport:recv(~p, ~p, ~p) - ~p~n", [Socket, Length, Timeout, RecvResult]),
+            RecvResult;
+        _ ->
+            RecvResult
+    end.
 
 %% @doc Send a packet on a socket.
 %% @see gen_tcp:send/2
 -spec send(inet:socket(), iolist()) -> ok | {error, atom()}.
 send(Socket, Packet) ->
-	gen_tcp:send(Socket, Packet).
+	SendResult = gen_tcp:send(Socket, Packet),
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_tcp_transport:send(~p, ~p) - ~p~n", [Socket, Packet, SendResult]),
+            SendResult;
+        _ ->
+            SendResult
+    end.
 
 %% @doc Set one or more options for a socket.
 %% @see inet:setopts/2

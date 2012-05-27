@@ -56,8 +56,8 @@
 %% protocol, you simply need to return <em>{upgrade, protocol, {@module}}</em>
 %% in your <em>cowboy_http_handler:init/3</em> handler function.
 -spec upgrade(pid(), module(), any(), #http_req{}) -> closed.
-upgrade(ListenerPid, Handler, Opts, Req) ->
-	cowboy_listener:move_connection(ListenerPid, websocket, self()),
+upgrade(_ListenerPid, Handler, Opts, Req) ->
+	%cowboy_listener:move_connection(ListenerPid, websocket, self()), - listener is not called for efficency reasons
 	case catch websocket_upgrade(#state{handler=Handler, opts=Opts}, Req) of
 		{ok, State, Req2} -> handler_init(State, Req2);
 		{'EXIT', _Reason} -> upgrade_error(Req)
@@ -221,7 +221,15 @@ handler_loop_timeout(State=#state{timeout=Timeout, timeout_ref=PrevRef}) ->
 -spec handler_loop(#state{}, #http_req{}, any(), binary()) -> closed.
 handler_loop(State=#state{messages={OK, Closed, Error}, timeout_ref=TRef},
 		Req=#http_req{socket=Socket}, HandlerState, SoFar) ->
-	receive
+    receive Message -> ok end,
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_http_websocket:handler_loop(~p, ~p, ~p, ~p) - received ~p~n",
+                                  [State, Req, HandlerState, SoFar, Message]);
+        false ->
+            ok
+    end,
+    case Message of
 		{OK, Socket, Data} ->
 			websocket_data(State, Req, HandlerState,
 				<< SoFar/binary, Data/binary >>);
@@ -515,6 +523,13 @@ websocket_close(State, Req=#http_req{socket=Socket,
 	any(), atom() | {atom(), atom()}) -> closed.
 handler_terminate(#state{handler=Handler, opts=Opts},
 		Req, HandlerState, TerminateReason) ->
+    case config_dynamic:is_debug_connection() of
+        true ->
+            error_logger:info_msg("cowboy_http_websocket:handler_terminate - Terminating with reason ~p (Req is ~p, HandlerState is ~p)~n",
+                                  [TerminateReason, Req, HandlerState]);
+        false ->
+            ok
+    end,
 	try
 		Handler:websocket_terminate(TerminateReason, Req, HandlerState)
 	catch Class:Reason ->
