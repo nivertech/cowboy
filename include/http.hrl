@@ -1,4 +1,4 @@
-%% Copyright (c) 2011, Loïc Hoguin <essen@dev-extend.eu>
+%% Copyright (c) 2011-2012, Loïc Hoguin <essen@ninenines.eu>
 %% Copyright (c) 2011, Anthony Ramine <nox@dev-extend.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
@@ -52,5 +52,7 @@
 								fun(() -> {sent, non_neg_integer()})},
 
 	%% Functions.
+	onresponse = undefined :: undefined | fun((cowboy_http:status(),
+		cowboy_http:headers(), #http_req{}) -> #http_req{}),
 	urldecode :: {fun((binary(), T) -> binary()), T}
 }).

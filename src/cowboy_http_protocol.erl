@@ -1,4 +1,4 @@
-%% Copyright (c) 2011, Loïc Hoguin <essen@dev-extend.eu>
+%% Copyright (c) 2011-2012, Loïc Hoguin <essen@ninenines.eu>
 %% Copyright (c) 2011, Anthony Ramine <nox@dev-extend.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
@@ -48,6 +48,8 @@
 	dispatch :: cowboy_dispatcher:dispatch_rules(),
 	handler :: {module(), any()},
 	onrequest :: undefined | fun((#http_req{}) -> #http_req{}),
+	onresponse = undefined :: undefined | fun((cowboy_http:status(),
+		cowboy_http:headers(), #http_req{}) -> #http_req{}),
 	urldecode :: {fun((binary(), T) -> binary()), T},
 	req_empty_lines = 0 :: integer(),
 	max_empty_lines :: integer(),
@@ -79,6 +81,7 @@ init(ListenerPid, Socket, Transport, Opts) ->
 	MaxKeepalive = proplists:get_value(max_keepalive, Opts, infinity),
 	MaxLineLength = proplists:get_value(max_line_length, Opts, 4096),
 	OnRequest = proplists:get_value(onrequest, Opts),
+	OnResponse = proplists:get_value(onresponse, Opts),
 	Timeout = proplists:get_value(timeout, Opts, 5000),
 	URLDecDefault = {fun cowboy_http:urldecode/2, crash},
 	URLDec = proplists:get_value(urldecode, Opts, URLDecDefault),
@@ -86,7 +89,8 @@ init(ListenerPid, Socket, Transport, Opts) ->
 	wait_request(#state{listener=ListenerPid, socket=Socket, transport=Transport,
 		dispatch=Dispatch, max_empty_lines=MaxEmptyLines,
 		max_keepalive=MaxKeepalive, max_line_length=MaxLineLength,
-		timeout=Timeout, onrequest=OnRequest, urldecode=URLDec}).
+		timeout=Timeout, onrequest=OnRequest, onresponse=OnResponse,
+		urldecode=URLDec}).
 
 %% @private
 -spec parse_request(#state{}) -> ok.
@@ -121,19 +125,28 @@ request({http_request, Method, {absoluteURI, _Scheme, _Host, _Port, Path},
 	request({http_request, Method, {abs_path, Path}, Version}, State);
 request({http_request, Method, {abs_path, AbsPath}, Version},
 		State=#state{socket=Socket, transport=Transport,
-		urldecode={URLDecFun, URLDecArg}=URLDec}) ->
+		req_keepalive=Keepalive, max_keepalive=MaxKeepalive,
+		onresponse=OnResponse, urldecode={URLDecFun, URLDecArg}=URLDec}) ->
 	URLDecode = fun(Bin) -> URLDecFun(Bin, URLDecArg) end,
 	{Path, RawPath, Qs} = cowboy_dispatcher:split_path(AbsPath, URLDecode),
-	ConnAtom = version_to_connection(Version),
+	ConnAtom = if Keepalive < MaxKeepalive -> version_to_connection(Version);
+		true -> close
+	end,
 	parse_header(#http_req{socket=Socket, transport=Transport,
 		connection=ConnAtom, pid=self(), method=Method, version=Version,
-		path=Path, raw_path=RawPath, raw_qs=Qs, urldecode=URLDec}, State);
+		path=Path, raw_path=RawPath, raw_qs=Qs, onresponse=OnResponse,
+		urldecode=URLDec}, State);
 request({http_request, Method, '*', Version},
-		State=#state{socket=Socket, transport=Transport, urldecode=URLDec}) ->
-	ConnAtom = version_to_connection(Version),
+		State=#state{socket=Socket, transport=Transport,
+		req_keepalive=Keepalive, max_keepalive=MaxKeepalive,
+		onresponse=OnResponse, urldecode=URLDec}) ->
+	ConnAtom = if Keepalive < MaxKeepalive -> version_to_connection(Version);
+		true -> close
+	end,
 	parse_header(#http_req{socket=Socket, transport=Transport,
 		connection=ConnAtom, pid=self(), method=Method, version=Version,
-		path='*', raw_path= <<"*">>, raw_qs= <<>>, urldecode=URLDec}, State);
+		path='*', raw_path= <<"*">>, raw_qs= <<>>, onresponse=OnResponse,
+		urldecode=URLDec}, State);
 request({http_request, _Method, _URI, _Version}, State) ->
 	error_terminate(501, State);
 request({http_error, <<"\r\n">>},
@@ -186,7 +199,9 @@ header({http_header, _I, 'Host', _R, RawHost}, Req=#http_req{
 header({http_header, _I, 'Host', _R, _V}, Req, State) ->
 	parse_header(Req, State);
 header({http_header, _I, 'Connection', _R, Connection},
-		Req=#http_req{headers=Headers}, State) ->
+		Req=#http_req{headers=Headers}, State=#state{
+		req_keepalive=Keepalive, max_keepalive=MaxKeepalive})
+		when Keepalive < MaxKeepalive ->
 	Req2 = Req#http_req{headers=[{'Connection', Connection}|Headers]},
 	{ConnTokens, Req3}
 		= cowboy_http_req:parse_header('Connection', Req2),
@@ -316,16 +331,15 @@ handler_loop_timeout(State=#state{loop_timeout=Timeout,
 		loop_timeout_ref=PrevRef}) ->
 	_ = case PrevRef of undefined -> ignore; PrevRef ->
 		erlang:cancel_timer(PrevRef) end,
-	TRef = make_ref(),
-	erlang:send_after(Timeout, self(), {?MODULE, timeout, TRef}),
+	TRef = erlang:start_timer(Timeout, self(), ?MODULE),
 	State#state{loop_timeout_ref=TRef}.
 
 -spec handler_loop(any(), #http_req{}, #state{}) -> ok.
 handler_loop(HandlerState, Req, State=#state{loop_timeout_ref=TRef}) ->
 	receive
-		{?MODULE, timeout, TRef} ->
+		{timeout, TRef, ?MODULE} ->
 			terminate_request(HandlerState, Req, State);
-		{?MODULE, timeout, OlderTRef} when is_reference(OlderTRef) ->
+		{timeout, OlderTRef, ?MODULE} when is_reference(OlderTRef) ->
 			handler_loop(HandlerState, Req, State);
 		Message ->
 			handler_call(HandlerState, Req, State, Message)
@@ -376,15 +390,14 @@ terminate_request(HandlerState, Req, State) ->
 	next_request(Req, State, HandlerRes).
 
 -spec next_request(#http_req{}, #state{}, any()) -> ok.
-next_request(Req=#http_req{connection=Conn},
-		State=#state{req_keepalive=Keepalive, max_keepalive=MaxKeepalive},
-		HandlerRes) ->
+next_request(Req=#http_req{connection=Conn}, State=#state{
+		req_keepalive=Keepalive}, HandlerRes) ->
 	RespRes = ensure_response(Req),
 	{BodyRes, Buffer} = ensure_body_processed(Req),
 	%% Flush the resp_sent message before moving on.
 	receive {cowboy_http_req, resp_sent} -> ok after 0 -> ok end,
 	case {HandlerRes, BodyRes, RespRes, Conn} of
-		{ok, ok, ok, keepalive} when Keepalive < MaxKeepalive ->
+		{ok, ok, ok, keepalive} ->
 			?MODULE:parse_request(State#state{
 				buffer=Buffer, req_empty_lines=0,
 				req_keepalive=Keepalive + 1});
@@ -425,12 +438,13 @@ ensure_response(#http_req{socket=Socket, transport=Transport,
 
 %% Only send an error reply if there is no resp_sent message.
 -spec error_terminate(cowboy_http:status(), #state{}) -> ok.
-error_terminate(Code, State=#state{socket=Socket, transport=Transport}) ->
+error_terminate(Code, State=#state{socket=Socket, transport=Transport,
+		onresponse=OnResponse}) ->
 	receive
 		{cowboy_http_req, resp_sent} -> ok
 	after 0 ->
 		_ = cowboy_http_req:reply(Code, #http_req{
-			socket=Socket, transport=Transport,
+			socket=Socket, transport=Transport, onresponse=OnResponse,
 			connection=close, pid=self(), resp_state=waiting}),
 		ok
 	end,

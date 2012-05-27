@@ -1,4 +1,4 @@
-%% Copyright (c) 2011, Loïc Hoguin <essen@dev-extend.eu>
+%% Copyright (c) 2011-2012, Loïc Hoguin <essen@ninenines.eu>
 %% Copyright (c) 2011, Anthony Ramine <nox@dev-extend.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
@@ -26,7 +26,8 @@
 -export([te_chunked/2, te_identity/2, ce_identity/1]).
 
 %% Interpretation.
--export([connection_to_atom/1, urldecode/1, urldecode/2, urlencode/1,
+-export([connection_to_atom/1, version_to_binary/1,
+	urldecode/1, urldecode/2, urlencode/1,
 	urlencode/2, x_www_form_urlencoded/2]).
 
 -type method() :: 'OPTIONS' | 'GET' | 'HEAD'
@@ -269,7 +270,15 @@ maybe_qparam(Data, Fun) ->
 		fun (<< $;, Rest/binary >>) ->
 			whitespace(Rest,
 				fun (Rest2) ->
-					qparam(Rest2, Fun)
+					%% This is a non-strict parsing clause required by some user agents
+					%% that use the wrong delimiter putting a charset where a qparam is
+					%% expected.
+					try qparam(Rest2, Fun) of
+						Result -> Result
+					catch
+						error:function_clause ->
+							Fun(<<",", Rest2/binary>>, 1000)
+					end
 				end);
 			(Rest) ->
 				Fun(Rest, 1000)
@@ -773,6 +782,11 @@ connection_to_atom([<<"close">>|_Tail]) ->
 connection_to_atom([_Any|Tail]) ->
 	connection_to_atom(Tail).
 
+%% @doc Convert an HTTP version tuple to its binary form.
+-spec version_to_binary(version()) -> binary().
+version_to_binary({1, 1}) -> <<"HTTP/1.1">>;
+version_to_binary({1, 0}) -> <<"HTTP/1.0">>.
+
 %% @doc Decode a URL encoded binary.
 %% @equiv urldecode(Bin, crash)
 -spec urldecode(binary()) -> binary().
@@ -879,6 +893,12 @@ nonempty_charset_list_test_() ->
 		{<<"iso-8859-5, unicode-1-1;q=0.8">>, [
 			{<<"iso-8859-5">>, 1000},
 			{<<"unicode-1-1">>, 800}
+		]},
+		%% Some user agents send this invalid value for the Accept-Charset header
+		{<<"ISO-8859-1;utf-8;q=0.7,*;q=0.7">>, [
+			{<<"iso-8859-1">>, 1000},
+			{<<"utf-8">>, 700},
+			{<<"*">>, 700}
 		]}
 	],
 	[{V, fun() -> R = nonempty_list(V, fun conneg/2) end} || {V, R} <- Tests].

@@ -1,4 +1,4 @@
-%% Copyright (c) 2011, Loïc Hoguin <essen@dev-extend.eu>
+%% Copyright (c) 2011-2012, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -14,27 +14,9 @@
 
 %% @doc WebSocket protocol implementation.
 %%
-%% Supports the protocol version 0 (hixie-76), version 7 (hybi-7)
-%% and version 8 (hybi-8, hybi-9 and hybi-10).
-%%
-%% Version 0 is supported by the following browsers:
-%% <ul>
-%%  <li>Firefox 4-5 (disabled by default)</li>
-%%  <li>Chrome 6-13</li>
-%%  <li>Safari 5.0.1+</li>
-%%  <li>Opera 11.00+ (disabled by default)</li>
-%% </ul>
-%%
-%% Version 7 is supported by the following browser:
-%% <ul>
-%%  <li>Firefox 6</li>
-%% </ul>
-%%
-%% Version 8+ is supported by the following browsers:
-%% <ul>
-%%  <li>Firefox 7+</li>
-%%  <li>Chrome 14+</li>
-%% </ul>
+%% When using websockets, make sure that the crypto application is
+%% included in your release. If you are not using releases then there
+%% is no need for concern as crypto is already included.
 -module(cowboy_http_websocket).
 
 -export([upgrade/4]). %% API.
@@ -232,8 +214,7 @@ handler_loop_timeout(State=#state{timeout=infinity}) ->
 handler_loop_timeout(State=#state{timeout=Timeout, timeout_ref=PrevRef}) ->
 	_ = case PrevRef of undefined -> ignore; PrevRef ->
 		erlang:cancel_timer(PrevRef) end,
-	TRef = make_ref(),
-	erlang:send_after(Timeout, self(), {?MODULE, timeout, TRef}),
+	TRef = erlang:start_timer(Timeout, self(), ?MODULE),
 	State#state{timeout_ref=TRef}.
 
 %% @private
@@ -248,9 +229,9 @@ handler_loop(State=#state{messages={OK, Closed, Error}, timeout_ref=TRef},
 			handler_terminate(State, Req, HandlerState, {error, closed});
 		{Error, Socket, Reason} ->
 			handler_terminate(State, Req, HandlerState, {error, Reason});
-		{?MODULE, timeout, TRef} ->
+		{timeout, TRef, ?MODULE} ->
 			websocket_close(State, Req, HandlerState, {normal, timeout});
-		{?MODULE, timeout, OlderTRef} when is_reference(OlderTRef) ->
+		{timeout, OlderTRef, ?MODULE} when is_reference(OlderTRef) ->
 			handler_loop(State, Req, HandlerState, SoFar);
 		Message ->
 			handler_call(State, Req, HandlerState,
