@@ -81,7 +81,7 @@ accept(LSocket, Timeout) ->
 	-> {ok, any()} | {error, closed | atom()}.
 recv(Socket, Length, Timeout) ->
 	RecvResult = gen_tcp:recv(Socket, Length, Timeout),
-    case config_dynamic:is_debug_connection() of
+    case za_prm:is_debug_connection() of
         true ->
             error_logger:info_msg("cowboy_tcp_transport:recv(~p, ~p, ~p) - ~p~n", [Socket, Length, Timeout, RecvResult]),
             RecvResult;
@@ -94,7 +94,7 @@ recv(Socket, Length, Timeout) ->
 -spec send(inet:socket(), iolist()) -> ok | {error, atom()}.
 send(Socket, Packet) ->
 	SendResult = gen_tcp:send(Socket, Packet),
-    case config_dynamic:is_debug_connection() of
+    case za_prm:is_debug_connection() of
         true ->
             error_logger:info_msg("cowboy_tcp_transport:send(~p, ~p) - ~p~n", [Socket, Packet, SendResult]),
             SendResult;

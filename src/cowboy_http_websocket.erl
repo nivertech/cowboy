@@ -222,7 +222,7 @@ handler_loop_timeout(State=#state{timeout=Timeout, timeout_ref=PrevRef}) ->
 handler_loop(State=#state{messages={OK, Closed, Error}, timeout_ref=TRef},
 		Req=#http_req{socket=Socket}, HandlerState, SoFar) ->
     receive Message -> ok end,
-    case config_dynamic:is_debug_connection() of
+    case za_prm:is_debug_connection() of
         true ->
             error_logger:info_msg("cowboy_http_websocket:handler_loop(~p, ~p, ~p, ~p) - received ~p~n",
                                   [State, Req, HandlerState, SoFar, Message]);
@@ -523,7 +523,7 @@ websocket_close(State, Req=#http_req{socket=Socket,
 	any(), atom() | {atom(), atom()}) -> closed.
 handler_terminate(#state{handler=Handler, opts=Opts},
 		Req, HandlerState, TerminateReason) ->
-    case config_dynamic:is_debug_connection() of
+    case za_prm:is_debug_connection() of
         true ->
             error_logger:info_msg("cowboy_http_websocket:handler_terminate - Terminating with reason ~p (Req is ~p, HandlerState is ~p)~n",
                                   [TerminateReason, Req, HandlerState]);
