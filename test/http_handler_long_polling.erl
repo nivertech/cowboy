@@ -6,13 +6,13 @@
 
 init({_Transport, http}, Req, _Opts) ->
 	erlang:send_after(500, self(), timeout),
-	{loop, Req, 9, 5000, hibernate}.
+	{loop, Req, 5, 5000, hibernate}.
 
 handle(_Req, _State) ->
 	exit(badarg).
 
 info(timeout, Req, 0) ->
-	{ok, Req2} = cowboy_http_req:reply(102, Req),
+	{ok, Req2} = cowboy_req:reply(102, Req),
 	{ok, Req2, 0};
 info(timeout, Req, State) ->
 	erlang:send_after(500, self(), timeout),

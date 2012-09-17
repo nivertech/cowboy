@@ -1,4 +1,4 @@
-%% Copyright (c) 2011, Loïc Hoguin <essen@dev-extend.eu>
+%% Copyright (c) 2011, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -33,20 +33,21 @@ groups() ->
 
 init_per_suite(Config) ->
 	application:start(inets),
+	application:start(ranch),
 	application:start(cowboy),
 	Config.
 
 end_per_suite(_Config) ->
 	application:stop(cowboy),
+	application:stop(ranch),
 	application:stop(inets),
 	ok.
 
 init_per_group(ws, Config) ->
 	Port = 33080,
-	cowboy:start_listener(ws, 100,
-		cowboy_tcp_transport, [{port, Port}],
-		cowboy_http_protocol, [{dispatch, init_dispatch()}]
-	),
+	cowboy:start_http(ws, 100, [{port, Port}], [
+		{dispatch, init_dispatch()}
+	]),
 	[{port, Port}|Config].
 
 end_per_group(Listener, _Config) ->

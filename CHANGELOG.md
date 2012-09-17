@@ -1,6 +1,172 @@
 CHANGELOG
 =========
 
+next
+----
+
+*   This release drops R14 compatibility
+
+*   Use Ranch for connection handling
+
+    To start listeners you can now use cowboy:start_http/4 for HTTP,
+    and cowboy:start_https/4 for HTTPS. The proper transport and
+    protocol modules will be used.
+
+*   Shorten the name of many modules
+
+    * cowboy_http_protocol becomes cowboy_protocol.
+    * cowboy_http_req becomes cowboy_req.
+    * cowboy_http_rest becomes cowboy_rest.
+    * cowboy_http_static becomes cowboy_static.
+    * cowboy_http_websocket becomes cowboy_websocket.
+
+*   Introduce the cowboy_req:req() opaque type
+
+    The include/http.hrl file was removed. Users are expected to use
+    the cowboy_req API to access or modify the Req object.
+
+    This required a lot of changes so cleanup and optimization were
+    performed where possible.
+
+*   Add many cowboy_req functions
+
+    * cowboy_req:delete_resp_header/2 deletes a previously set resp header.
+    * cowboy_req:set_meta/3 sets metadata in the Req object.
+    * cowboy_req:to_list/1 converts the Req object to a list of key/values.
+    * cowboy_req:host_url/1 returns the request URL without the path or qs.
+    * cowboy_req:url/1 returns the full request URL.
+
+*   Rename or drop many cowboy_req functions
+
+    * Replace cowboy_req:host/1 with cowboy_req:raw_host/1.
+    * Replace cowboy_req:path/1 with cowboy_req:raw_path/1.
+    * cowboy_req:raw_qs/1 becomes cowboy_req:qs/1.
+
+*   Change the signature of many cowboy_req functions
+
+    * parse_header now returns {ok, any(), Req} instead of {any(), Req}.
+    * body_qs now returns {ok, QsVals, Req} instead of {QsVals, Req}.
+    * multipart_data now returns {headers, Headers, Req} instead of
+      {{headers, Headers}, Req} and {body, Body, Req} instead of
+      {{body, Body}, Req}.
+    * set_resp_* functions now return Req instead of {ok, Req}.
+
+*   Use -callback in behaviours
+
+*   Add cowboy_protocol:onrequest_fun/0 and :onresponse_fun/0 types
+
+*   Isolate multipart from body reading to fix an issue
+
+*   Change a websocket error from {error, protocol} to {error, badframe}
+
+*   Avoid a duplicate HTTP reply in cowboy_websocket:upgrade_error/1
+
+*   Avoid using proplists:get_value/{2,3} in a few places
+
+0.6.1
+-----
+
+*   Add hello_world, rest_hello_world, chunked_hello_world,
+    echo_get, echo_post and static examples.
+
+*   Add support for the "Expect: 100-continue" header.
+
+*   Keep the original 'Host' header value instead of modifying it.
+
+*   Fix use of parsed headers cache.
+
+*   REST: fix the matching of charsets.
+
+*   REST: allow <<"type/subtype">> format for content_types_accepted.
+
+*   Improve typespecs.
+
+0.6.0
+-----
+
+*   Add multipart support
+
+*   Add chunked transfer decoding support
+
+    Done by reworking the body reading API. Now all the body
+    reading goes through the cowboy_http_req:stream_body/1
+    function. This function takes care of handling both the
+    Transfer-Encoding and the Content-Encoding, returning
+    properly decoded data ready for consumption.
+
+*   Add fragmented websocket messages support
+
+    Properly tested by the addition of the Autobahn websocket
+    test suite to our toolbox. All tests pass except a few
+    related to UTF-8 handling, as Cowboy does no checks on that
+    end at this point.
+
+*   Add 'onrequest' and 'onresponse' hooks
+
+    The first can be used for all the special cases you may have
+    that can't be dealt with otherwise. It's also pretty good for
+    writing access logs or rewriting URLs.
+
+    The second can be used for logging errors or replacing error
+    pages, amongst others.
+
+*   Add cowboy:get_protocol_options/1 and cowboy:set_protocol_options/2
+
+    These functions allow for retrieving a listener's protocol options,
+    and for modifying them while the listener is running. This is
+    most useful to upgrade the dispatch list. The upgrade applies
+    to all the future connections.
+
+*   Add the sockname/1 function to TCP and SSL transports
+
+*   Improve SSL transport support
+
+    Add support for specifying the ciphers. Add CA support. Make
+    specifying the password optional.
+
+*   Add new HTTP status codes from RFC 6585
+
+*   Add a 'file' option to cowboy_http_static
+
+    This allows for mapping /folder/ paths to a /folder/index.html file.
+
+*   Add the '*' catch all Content-Type for REST
+
+*   Add {halt, Req, State} as a possible return value for REST
+
+*   Add absolute URI support for requests
+
+*   Add cowboy_http:x_www_form_urlencoded/2
+
+*   Various REST bug fixes
+
+*   Do not send chunked replies for HTTP/1.0 connections
+
+*   Fix a DST bug in the cookies code
+
+*   Fix a bug with setting cookie values containing slashes
+
+*   Fix a small timer leak when using loop/websocket timeouts
+
+*   Make charset and media type parsing more relaxed
+
+    This is to accomodate some widely used broken clients.
+
+*   Make error messages more readable
+
+*   Fix and improve type specifications
+
+*   Fix a bug preventing documentation from being generated
+
+*   Small improvements to the documentation
+
+*   Rework the HTTP test suite
+
+    The suite now uses an integrated Cowboy HTTP client. The client
+    is currently experimental and shouldn't be used.
+
+*   Add many many tests.
+
 0.4.0
 -----
 

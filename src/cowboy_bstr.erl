@@ -1,4 +1,4 @@
-%% Copyright (c) 2011, Loïc Hoguin <essen@dev-extend.eu>
+%% Copyright (c) 2011-2012, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -15,8 +15,12 @@
 %% @doc Binary string manipulation.
 -module(cowboy_bstr).
 
--export([to_lower/1]). %% Binary strings.
--export([char_to_lower/1, char_to_upper/1]). %% Characters.
+%% Binary strings.
+-export([to_lower/1]).
+
+%% Characters.
+-export([char_to_lower/1]).
+-export([char_to_upper/1]).
 
 %% @doc Convert a binary string to lowercase.
 -spec to_lower(binary()) -> binary().

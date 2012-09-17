@@ -15,6 +15,9 @@
 %% @doc Multipart parser.
 -module(cowboy_multipart).
 
+-export([parser/1]).
+-export([content_disposition/1]).
+
 -type part_parser() :: parser(more(part_result())).
 -type parser(T) :: fun((binary()) -> T).
 -type more(T) :: T | {more, parser(T)}.
@@ -27,9 +30,9 @@
 -type end_of_part() :: {end_of_part, cont(more(part_result()))}.
 -type disposition() :: {binary(), [{binary(), binary()}]}.
 
--export([parser/1, content_disposition/1]).
-
+-ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+-endif.
 
 %% API.
 
