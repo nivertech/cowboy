@@ -376,6 +376,7 @@ parse_header(Name, Req=#http_req{p_headers=PHeaders}) ->
 -spec parse_header_default(cowboy_http:header()) -> any().
 parse_header_default('Connection') -> [];
 parse_header_default('Transfer-Encoding') -> [<<"identity">>];
+parse_header_default(<<"Sec-Websocket-Protocol">>) -> [];
 parse_header_default(_Name) -> undefined.
 
 %% @doc Semantically parse headers.
