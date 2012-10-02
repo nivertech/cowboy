@@ -58,8 +58,8 @@
 %% protocol, you simply need to return <em>{upgrade, protocol, {@module}}</em>
 %% in your <em>cowboy_http_handler:init/3</em> handler function.
 -spec upgrade(pid(), module(), any(), cowboy_req:req()) -> closed.
-upgrade(ListenerPid, Handler, Opts, Req) ->
-	ranch_listener:remove_connection(ListenerPid),
+upgrade(_ListenerPid, Handler, Opts, Req) ->
+	%%ranch_listener:remove_connection(ListenerPid),
 	{ok, Transport, Socket} = cowboy_req:transport(Req),
 	State = #state{socket=Socket, transport=Transport,
 		handler=Handler, opts=Opts},
