@@ -23,7 +23,7 @@
 -export([upgrade/4]).
 
 -record(state, {
-	method = undefined :: cowboy_http:method(),
+	method = undefined :: binary(),
 
 	%% Handler.
 	handler :: atom(),
@@ -58,16 +58,16 @@
 	-> {ok, Req} | close when Req::cowboy_req:req().
 upgrade(_ListenerPid, Handler, Opts, Req) ->
 	try
-		{Method, Req1} = cowboy_req:method(Req),
+		Method = cowboy_req:get(method, Req),
 		case erlang:function_exported(Handler, rest_init, 2) of
 			true ->
-				case Handler:rest_init(Req1, Opts) of
+				case Handler:rest_init(Req, Opts) of
 					{ok, Req2, HandlerState} ->
 						service_available(Req2, #state{method=Method,
 							handler=Handler, handler_state=HandlerState})
 				end;
 			false ->
-				service_available(Req1, #state{method=Method,
+				service_available(Req, #state{method=Method,
 					handler=Handler})
 		end
 	catch Class:Reason ->
@@ -87,9 +87,10 @@ service_available(Req, State) ->
 %% known_methods/2 should return a list of atoms or binary methods.
 known_methods(Req, State=#state{method=Method}) ->
 	case call(Req, State, known_methods) of
-		no_call when Method =:= 'HEAD'; Method =:= 'GET'; Method =:= 'POST';
-					Method =:= 'PUT'; Method =:= 'DELETE'; Method =:= 'TRACE';
-					Method =:= 'CONNECT'; Method =:= 'OPTIONS' ->
+		no_call when Method =:= <<"HEAD">>; Method =:= <<"GET">>;
+				Method =:= <<"POST">>; Method =:= <<"PUT">>;
+				Method =:= <<"DELETE">>; Method =:= <<"TRACE">>;
+				Method =:= <<"CONNECT">>; Method =:= <<"OPTIONS">> ->
 			next(Req, State, fun uri_too_long/2);
 		no_call ->
 			next(Req, State, 501);
@@ -109,10 +110,10 @@ uri_too_long(Req, State) ->
 %% allowed_methods/2 should return a list of atoms or binary methods.
 allowed_methods(Req, State=#state{method=Method}) ->
 	case call(Req, State, allowed_methods) of
-		no_call when Method =:= 'HEAD'; Method =:= 'GET' ->
+		no_call when Method =:= <<"HEAD">>; Method =:= <<"GET">> ->
 			next(Req, State, fun malformed_request/2);
 		no_call ->
-			method_not_allowed(Req, State, ['GET', 'HEAD']);
+			method_not_allowed(Req, State, [<<"GET">>, <<"HEAD">>]);
 		{halt, Req2, HandlerState} ->
 			terminate(Req2, State#state{handler_state=HandlerState});
 		{List, Req2, HandlerState} ->
@@ -172,7 +173,7 @@ valid_entity_length(Req, State) ->
 
 %% If you need to add additional headers to the response at this point,
 %% you should do it directly in the options/2 call using set_resp_headers.
-options(Req, State=#state{method='OPTIONS'}) ->
+options(Req, State=#state{method= <<"OPTIONS">>}) ->
 	case call(Req, State, options) of
 		{halt, Req2, HandlerState} ->
 			terminate(Req2, State#state{handler_state=HandlerState});
@@ -209,7 +210,7 @@ content_types_provided(Req, State) ->
 		    CTP2 = [normalize_content_types(P) || P <- CTP],
 			State2 = State#state{
 				handler_state=HandlerState, content_types_p=CTP2},
-			{ok, Accept, Req3} = cowboy_req:parse_header('Accept', Req2),
+			{ok, Accept, Req3} = cowboy_req:parse_header(<<"accept">>, Req2),
 			case Accept of
 				undefined ->
 					{PMT, _Fun} = HeadCTP = hd(CTP2),
@@ -304,7 +305,7 @@ languages_provided(Req, State) ->
 		{LP, Req2, HandlerState} ->
 			State2 = State#state{handler_state=HandlerState, languages_p=LP},
 			{ok, AcceptLanguage, Req3} =
-				cowboy_req:parse_header('Accept-Language', Req2),
+				cowboy_req:parse_header(<<"accept-language">>, Req2),
 			case AcceptLanguage of
 				undefined ->
 					set_language(Req3, State2#state{language_a=hd(LP)});
@@ -366,7 +367,7 @@ charsets_provided(Req, State) ->
 		{CP, Req2, HandlerState} ->
 			State2 = State#state{handler_state=HandlerState, charsets_p=CP},
 			{ok, AcceptCharset, Req3} =
-				cowboy_req:parse_header('Accept-Charset', Req2),
+				cowboy_req:parse_header(<<"accept-charset">>, Req2),
 			case AcceptCharset of
 				undefined ->
 					set_content_type(Req3, State2#state{
@@ -478,7 +479,7 @@ resource_exists(Req, State) ->
 		fun if_match_exists/2, fun if_match_musnt_exist/2).
 
 if_match_exists(Req, State) ->
-	case cowboy_req:parse_header('If-Match', Req) of
+	case cowboy_req:parse_header(<<"if-match">>, Req) of
 		{ok, undefined, Req2} ->
 			if_unmodified_since_exists(Req2, State);
 		{ok, '*', Req2} ->
@@ -496,13 +497,13 @@ if_match(Req, State, EtagsList) ->
 	end.
 
 if_match_musnt_exist(Req, State) ->
-	case cowboy_req:header('If-Match', Req) of
+	case cowboy_req:header(<<"if-match">>, Req) of
 		{undefined, Req2} -> is_put_to_missing_resource(Req2, State);
 		{_Any, Req2} -> precondition_failed(Req2, State)
 	end.
 
 if_unmodified_since_exists(Req, State) ->
-	case cowboy_req:parse_header('If-Unmodified-Since', Req) of
+	case cowboy_req:parse_header(<<"if-unmodified-since">>, Req) of
 		{ok, undefined, Req2} ->
 			if_none_match_exists(Req2, State);
 		{ok, IfUnmodifiedSince, Req2} ->
@@ -520,7 +521,7 @@ if_unmodified_since(Req, State, IfUnmodifiedSince) ->
 	end.
 
 if_none_match_exists(Req, State) ->
-	case cowboy_req:parse_header('If-None-Match', Req) of
+	case cowboy_req:parse_header(<<"if-none-match">>, Req) of
 		{ok, undefined, Req2} ->
 			if_modified_since_exists(Req2, State);
 		{ok, '*', Req2} ->
@@ -542,13 +543,13 @@ if_none_match(Req, State, EtagsList) ->
 	end.
 
 precondition_is_head_get(Req, State=#state{method=Method})
-		when Method =:= 'HEAD'; Method =:= 'GET' ->
+		when Method =:= <<"HEAD">>; Method =:= <<"GET">> ->
 	not_modified(Req, State);
 precondition_is_head_get(Req, State) ->
 	precondition_failed(Req, State).
 
 if_modified_since_exists(Req, State) ->
-	case cowboy_req:parse_header('If-Modified-Since', Req) of
+	case cowboy_req:parse_header(<<"if-modified-since">>, Req) of
 		{ok, undefined, Req2} ->
 			method(Req2, State);
 		{ok, IfModifiedSince, Req2} ->
@@ -584,7 +585,7 @@ not_modified(Req, State) ->
 precondition_failed(Req, State) ->
 	respond(Req, State, 412).
 
-is_put_to_missing_resource(Req, State=#state{method='PUT'}) ->
+is_put_to_missing_resource(Req, State=#state{method= <<"PUT">>}) ->
 	moved_permanently(Req, State, fun is_conflict/2);
 is_put_to_missing_resource(Req, State) ->
 	previously_existed(Req, State).
@@ -626,7 +627,7 @@ moved_temporarily(Req, State) ->
 			is_post_to_missing_resource(Req, State, 410)
 	end.
 
-is_post_to_missing_resource(Req, State=#state{method='POST'}, OnFalse) ->
+is_post_to_missing_resource(Req, State=#state{method= <<"POST">>}, OnFalse) ->
 	allow_missing_post(Req, State, OnFalse);
 is_post_to_missing_resource(Req, State, OnFalse) ->
 	respond(Req, State, OnFalse).
@@ -634,14 +635,14 @@ is_post_to_missing_resource(Req, State, OnFalse) ->
 allow_missing_post(Req, State, OnFalse) ->
 	expect(Req, State, allow_missing_post, true, fun post_is_create/2, OnFalse).
 
-method(Req, State=#state{method='DELETE'}) ->
+method(Req, State=#state{method= <<"DELETE">>}) ->
 	delete_resource(Req, State);
-method(Req, State=#state{method='POST'}) ->
+method(Req, State=#state{method= <<"POST">>}) ->
 	post_is_create(Req, State);
-method(Req, State=#state{method='PUT'}) ->
+method(Req, State=#state{method= <<"PUT">>}) ->
 	is_conflict(Req, State);
 method(Req, State=#state{method=Method})
-		when Method =:= 'GET'; Method =:= 'HEAD' ->
+		when Method =:= <<"GET">>; Method =:= <<"HEAD">> ->
 	set_resp_body(Req, State);
 method(Req, State) ->
 	multiple_choices(Req, State).
@@ -692,8 +693,8 @@ is_conflict(Req, State) ->
 	expect(Req, State, is_conflict, false, fun put_resource/2, 409).
 
 put_resource(Req, State) ->
-	{Path, Req2} = cowboy_req:path(Req),
-	put_resource(cowboy_req:set_meta(put_path, Path, Req2),
+	Path = cowboy_req:get(path, Req),
+	put_resource(cowboy_req:set_meta(put_path, Path, Req),
 		State, fun is_new_resource/2).
 
 %% content_types_accepted should return a list of media types and their
@@ -714,7 +715,7 @@ put_resource(Req, State, OnTrue) ->
 		    CTA2 = [normalize_content_types(P) || P <- CTA],
 			State2 = State#state{handler_state=HandlerState},
 			{ok, ContentType, Req3}
-				= cowboy_req:parse_header('Content-Type', Req2),
+				= cowboy_req:parse_header(<<"content-type">>, Req2),
 			choose_content_type(Req3, State2, OnTrue, ContentType, CTA2)
 	end.
 

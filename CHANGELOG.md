@@ -33,6 +33,7 @@ next
     * cowboy_req:delete_resp_header/2 deletes a previously set resp header.
     * cowboy_req:set_meta/3 sets metadata in the Req object.
     * cowboy_req:to_list/1 converts the Req object to a list of key/values.
+    * cowboy_req:fragment/1 returns the request URL fragment.
     * cowboy_req:host_url/1 returns the request URL without the path or qs.
     * cowboy_req:url/1 returns the full request URL.
 
@@ -51,6 +52,18 @@ next
       {{body, Body}, Req}.
     * set_resp_* functions now return Req instead of {ok, Req}.
 
+*   Fix consistency issues caused by erlang:decode_packet/3
+
+    * The method is now always a case sensitive binary string.
+    * Note that standard method names are uppercase (e.g. <<"GET">>).
+    * Header names are now always lowercase binary string.
+
+*   The max_line_length cowboy_protocol option was replaced by 3 new options:
+
+    * max_request_line_length, defaults to 4096 bytes
+    * max_header_name_length, defaults to 64 bytes
+    * max_header_value_length, defaults to 4096 bytes
+
 *   Use -callback in behaviours
 
 *   Add cowboy_protocol:onrequest_fun/0 and :onresponse_fun/0 types
@@ -61,7 +74,7 @@ next
 
 *   Avoid a duplicate HTTP reply in cowboy_websocket:upgrade_error/1
 
-*   Avoid using proplists:get_value/{2,3} in a few places
+*   Many, many optimizations for the most critical code path
 
 0.6.1
 -----

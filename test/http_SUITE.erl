@@ -218,11 +218,11 @@ init_dispatch(Config) ->
 			{[<<"init_shutdown">>], http_handler_init_shutdown, []},
 			{[<<"long_polling">>], http_handler_long_polling, []},
 			{[<<"headers">>, <<"dupe">>], http_handler,
-				[{headers, [{<<"Connection">>, <<"close">>}]}]},
+				[{headers, [{<<"connection">>, <<"close">>}]}]},
 			{[<<"set_resp">>, <<"header">>], http_handler_set_resp,
-				[{headers, [{<<"Vary">>, <<"Accept">>}]}]},
+				[{headers, [{<<"vary">>, <<"Accept">>}]}]},
 			{[<<"set_resp">>, <<"overwrite">>], http_handler_set_resp,
-				[{headers, [{<<"Server">>, <<"DesireDrive/1.0">>}]}]},
+				[{headers, [{<<"server">>, <<"DesireDrive/1.0">>}]}]},
 			{[<<"set_resp">>, <<"body">>], http_handler_set_resp,
 				[{body, <<"A flameless dance does not equal a cycle">>}]},
 			{[<<"stream_body">>, <<"set_resp">>], http_handler_stream_body,
@@ -327,17 +327,17 @@ check_raw_status(Config) ->
 	HugeCookie = lists:flatten(["whatever_man_biiiiiiiiiiiig_cookie_me_want_77="
 		"Wed Apr 06 2011 10:38:52 GMT-0500 (CDT)" || _ <- lists:seq(1, 40)]),
 	ResponsePacket =
-"HTTP/1.0 302 Found
-Location: http://www.google.co.il/
-Cache-Control: private
-Content-Type: text/html; charset=UTF-8
-Set-Cookie: PREF=ID=568f67013d4a7afa:FF=0:TM=1323014101:LM=1323014101:S=XqctDWC65MzKT0zC; expires=Tue, 03-Dec-2013 15:55:01 GMT; path=/; domain=.google.com
-Date: Sun, 04 Dec 2011 15:55:01 GMT
-Server: gws
-Content-Length: 221
-X-XSS-Protection: 1; mode=block
-X-Frame-Options: SAMEORIGIN
-
+"HTTP/1.0 302 Found\r
+Location: http://www.google.co.il/\r
+Cache-Control: private\r
+Content-Type: text/html; charset=UTF-8\r
+Set-Cookie: PREF=ID=568f67013d4a7afa:FF=0:TM=1323014101:LM=1323014101:S=XqctDWC65MzKT0zC; expires=Tue, 03-Dec-2013 15:55:01 GMT; path=/; domain=.google.com\r
+Date: Sun, 04 Dec 2011 15:55:01 GMT\r
+Server: gws\r
+Content-Length: 221\r
+X-XSS-Protection: 1; mode=block\r
+X-Frame-Options: SAMEORIGIN\r
+\r
 <HTML><HEAD><meta http-equiv=\"content-type\" content=\"text/html;charset=utf-8\">
 <TITLE>302 Moved</TITLE></HEAD><BODY>
 <H1>302 Moved</H1>
@@ -354,13 +354,13 @@ The document has moved
 		{400, "\r\n\r\n\r\n\r\n\r\n\r\n"},
 		{400, "GET / HTTP/1.1\r\nHost: ninenines.eu\r\n\r\n"},
 		{400, "GET http://proxy/ HTTP/1.1\r\n\r\n"},
-		{400, ResponsePacket},
+		{505, ResponsePacket},
 		{408, "GET / HTTP/1.1\r\n"},
 		{408, "GET / HTTP/1.1\r\nHost: localhost"},
 		{408, "GET / HTTP/1.1\r\nHost: localhost\r\n"},
 		{408, "GET / HTTP/1.1\r\nHost: localhost\r\n\r"},
-		{413, Huge},
-		{413, "GET / HTTP/1.1\r\n" ++ Huge},
+		{414, Huge},
+		{400, "GET / HTTP/1.1\r\n" ++ Huge},
 		{505, "GET / HTTP/1.2\r\nHost: localhost\r\n\r\n"},
 		{closed, ""},
 		{closed, "\r\n"},
@@ -552,8 +552,8 @@ multipart(Config) ->
 	{ok, RespBody, _} = cowboy_client:response_body(Client3),
 	Parts = binary_to_term(RespBody),
 	Parts = [
-		{[{<<"X-Name">>, <<"answer">>}], <<"42">>},
-		{[{'Server', <<"Cowboy">>}], <<"It rocks!\r\n">>}
+		{[{<<"x-name">>, <<"answer">>}], <<"42">>},
+		{[{<<"server">>, <<"Cowboy">>}], <<"It rocks!\r\n">>}
 	].
 
 nc_reqs(Config, Input) ->
@@ -599,7 +599,7 @@ onrequest_reply(Config) ->
 onrequest_hook(Req) ->
 	case cowboy_req:qs_val(<<"reply">>, Req) of
 		{undefined, Req2} ->
-			cowboy_req:set_resp_header('Server', <<"Serenity">>, Req2);
+			cowboy_req:set_resp_header(<<"server">>, <<"Serenity">>, Req2);
 		{_, Req2} ->
 			{ok, Req3} = cowboy_req:reply(
 				200, [], <<"replied!">>, Req2),

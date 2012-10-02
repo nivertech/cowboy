@@ -42,7 +42,7 @@
 -module(cowboy_req).
 
 %% Request API.
--export([new/9]).
+-export([new/13]).
 -export([method/1]).
 -export([version/1]).
 -export([peer/1]).
@@ -56,6 +56,7 @@
 -export([qs_val/2]).
 -export([qs_val/3]).
 -export([qs_vals/1]).
+-export([fragment/1]).
 -export([host_url/1]).
 -export([url/1]).
 -export([binding/2]).
@@ -103,14 +104,9 @@
 -export([ensure_response/2]).
 
 %% Private setter/getter API.
--export([set_host/4]).
--export([set_connection/2]).
--export([add_header/3]).
--export([set_buffer/2]).
+-export([get/2]).
+-export([set/2]).
 -export([set_bindings/4]).
--export([get_resp_state/1]).
--export([get_buffer/1]).
--export([get_connection/1]).
 
 %% Misc API.
 -export([compact/1]).
@@ -122,6 +118,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+-type resp_body_fun() :: fun(() -> {sent, non_neg_integer()}).
+
 -record(http_req, {
 	%% Transport.
 	socket = undefined :: undefined | inet:socket(),
@@ -130,7 +128,7 @@
 
 	%% Request.
 	pid = undefined :: pid(),
-	method = 'GET' :: cowboy_http:method(),
+	method = <<"GET">> :: binary(),
 	version = {1, 1} :: cowboy_http:version(),
 	peer = undefined :: undefined | {inet:ip_address(), inet:port_number()},
 	host = undefined :: undefined | binary(),
@@ -140,6 +138,7 @@
 	path_info = undefined :: undefined | cowboy_dispatcher:tokens(),
 	qs = undefined :: binary(),
 	qs_vals = undefined :: undefined | list({binary(), binary() | true}),
+	fragment = undefined :: binary(),
 	bindings = undefined :: undefined | cowboy_dispatcher:bindings(),
 	headers = [] :: cowboy_http:headers(),
 	p_headers = [] :: [any()], %% @todo Improve those specs.
@@ -154,12 +153,10 @@
 	%% Response.
 	resp_state = waiting :: locked | waiting | chunks | done,
 	resp_headers = [] :: cowboy_http:headers(),
-	resp_body = <<>> :: iodata()
-		| {non_neg_integer(), fun(() -> {sent, non_neg_integer()})},
+	resp_body = <<>> :: iodata() | {non_neg_integer(), resp_body_fun()},
 
 	%% Functions.
-	onresponse = undefined :: undefined | cowboy_protocol:onresponse_fun(),
-	urldecode :: {fun((binary(), T) -> binary()), T}
+	onresponse = undefined :: undefined | cowboy_protocol:onresponse_fun()
 }).
 
 -opaque req() :: #http_req{}.
@@ -171,18 +168,40 @@
 %%
 %% This function takes care of setting the owner's pid to self().
 %% @private
--spec new(inet:socket(), module(), keepalive | close,
-	cowboy_http:method(), cowboy_http:version(), binary(), binary(),
-	undefined | fun(), undefined | {fun(), atom()})
+%%
+%% Since we always need to parse the Connection header, we do it
+%% in an optimized way and add the parsed value to p_headers' cache.
+-spec new(inet:socket(), module(), binary(), binary(), binary(), binary(),
+	cowboy_http:version(), cowboy_http:headers(), binary(),
+	inet:port_number() | undefined, binary(), boolean(),
+	undefined | cowboy_protocol:onresponse_fun())
 	-> req().
-new(Socket, Transport, Connection, Method, Version, Path, Qs,
-		OnResponse, URLDecode) ->
-	#http_req{socket=Socket, transport=Transport, connection=Connection,
-		pid=self(), method=Method, version=Version, path=Path, qs=Qs,
-		onresponse=OnResponse, urldecode=URLDecode}.
+new(Socket, Transport, Method, Path, Query, Fragment,
+		Version, Headers, Host, Port, Buffer, CanKeepalive,
+		OnResponse) ->
+	Req = #http_req{socket=Socket, transport=Transport, pid=self(),
+		method=Method, path=Path, qs=Query, fragment=Fragment, version=Version,
+		headers=Headers, host=Host, port=Port, buffer=Buffer,
+		onresponse=OnResponse},
+	case CanKeepalive of
+		false ->
+			Req#http_req{connection=close};
+		true ->
+			case lists:keyfind(<<"connection">>, 1, Headers) of
+				false when Version =:= {1, 1} ->
+					Req; %% keepalive
+				false ->
+					Req#http_req{connection=close};
+				{_, ConnectionHeader} ->
+					Tokens = parse_connection_before(ConnectionHeader, []),
+					Connection = connection_to_atom(Tokens),
+					Req#http_req{connection=Connection,
+						p_headers=[{<<"connection">>, Tokens}]}
+			end
+	end.
 
 %% @doc Return the HTTP method of the request.
--spec method(Req) -> {cowboy_http:method(), Req} when Req::req().
+-spec method(Req) -> {binary(), Req} when Req::req().
 method(Req) ->
 	{Req#http_req.method, Req}.
 
@@ -203,8 +222,8 @@ peer(Req) ->
 %% @doc Returns the peer address calculated from headers.
 -spec peer_addr(Req) -> {inet:ip_address(), Req} when Req::req().
 peer_addr(Req = #http_req{}) ->
-	{RealIp, Req1} = header(<<"X-Real-Ip">>, Req),
-	{ForwardedForRaw, Req2} = header(<<"X-Forwarded-For">>, Req1),
+	{RealIp, Req1} = header(<<"x-real-ip">>, Req),
+	{ForwardedForRaw, Req2} = header(<<"x-forwarded-for">>, Req1),
 	{{PeerIp, _PeerPort}, Req3} = peer(Req2),
 	ForwardedFor = case ForwardedForRaw of
 		undefined ->
@@ -267,10 +286,9 @@ qs_val(Name, Req) when is_binary(Name) ->
 %% missing.
 -spec qs_val(binary(), Req, Default)
 	-> {binary() | true | Default, Req} when Req::req(), Default::any().
-qs_val(Name, Req=#http_req{qs=RawQs, qs_vals=undefined,
-		urldecode={URLDecFun, URLDecArg}}, Default) when is_binary(Name) ->
-	QsVals = cowboy_http:x_www_form_urlencoded(
-		RawQs, fun(Bin) -> URLDecFun(Bin, URLDecArg) end),
+qs_val(Name, Req=#http_req{qs=RawQs, qs_vals=undefined}, Default)
+		when is_binary(Name) ->
+	QsVals = cowboy_http:x_www_form_urlencoded(RawQs),
 	qs_val(Name, Req#http_req{qs_vals=QsVals}, Default);
 qs_val(Name, Req, Default) ->
 	case lists:keyfind(Name, 1, Req#http_req.qs_vals) of
@@ -280,13 +298,16 @@ qs_val(Name, Req, Default) ->
 
 %% @doc Return the full list of query string values.
 -spec qs_vals(Req) -> {list({binary(), binary() | true}), Req} when Req::req().
-qs_vals(Req=#http_req{qs=RawQs, qs_vals=undefined,
-		urldecode={URLDecFun, URLDecArg}}) ->
-	QsVals = cowboy_http:x_www_form_urlencoded(
-		RawQs, fun(Bin) -> URLDecFun(Bin, URLDecArg) end),
+qs_vals(Req=#http_req{qs=RawQs, qs_vals=undefined}) ->
+	QsVals = cowboy_http:x_www_form_urlencoded(RawQs),
 	qs_vals(Req#http_req{qs_vals=QsVals});
 qs_vals(Req=#http_req{qs_vals=QsVals}) ->
 	{QsVals, Req}.
+
+%% @doc Return the raw fragment directly taken from the request.
+-spec fragment(Req) -> {binary(), Req} when Req::req().
+fragment(Req) ->
+	{Req#http_req.fragment, Req}.
 
 %% @doc Return the request URL as a binary without the path and query string.
 %%
@@ -308,15 +329,19 @@ host_url(Req=#http_req{transport=Transport, host=Host, port=Port}) ->
 
 %% @doc Return the full request URL as a binary.
 %%
-%% The URL includes the scheme, host, port, path and query string.
+%% The URL includes the scheme, host, port, path, query string and fragment.
 -spec url(Req) -> {binary(), Req} when Req::req().
-url(Req=#http_req{path=Path, qs=QS}) ->
+url(Req=#http_req{path=Path, qs=QS, fragment=Fragment}) ->
 	{HostURL, Req2} = host_url(Req),
 	QS2 = case QS of
 		<<>> -> <<>>;
 		_ -> << "?", QS/binary >>
 	end,
-	{<< HostURL/binary, Path/binary, QS2/binary >>, Req2}.
+	Fragment2 = case Fragment of
+		<<>> -> <<>>;
+		_ -> << "#", Fragment/binary >>
+	end,
+	{<< HostURL/binary, Path/binary, QS2/binary, Fragment2/binary >>, Req2}.
 
 %% @equiv binding(Name, Req, undefined)
 -spec binding(atom(), Req) -> {binary() | undefined, Req} when Req::req().
@@ -339,15 +364,15 @@ bindings(Req) ->
 	{Req#http_req.bindings, Req}.
 
 %% @equiv header(Name, Req, undefined)
--spec header(atom() | binary(), Req)
+-spec header(binary(), Req)
 	-> {binary() | undefined, Req} when Req::req().
-header(Name, Req) when is_atom(Name) orelse is_binary(Name) ->
+header(Name, Req) ->
 	header(Name, Req, undefined).
 
 %% @doc Return the header value for the given key, or a default if missing.
--spec header(atom() | binary(), Req, Default)
+-spec header(binary(), Req, Default)
 	-> {binary() | Default, Req} when Req::req(), Default::any().
-header(Name, Req, Default) when is_atom(Name) orelse is_binary(Name) ->
+header(Name, Req, Default) ->
 	case lists:keyfind(Name, 1, Req#http_req.headers) of
 		{Name, Value} -> {Value, Req};
 		false -> {Default, Req}
@@ -363,7 +388,7 @@ headers(Req) ->
 %% When the value isn't found, a proper default value for the type
 %% returned is used as a return value.
 %% @see parse_header/3
--spec parse_header(cowboy_http:header(), Req)
+-spec parse_header(binary(), Req)
 	-> {ok, any(), Req} | {undefined, binary(), Req}
 	| {error, badarg} when Req::req().
 parse_header(Name, Req=#http_req{p_headers=PHeaders}) ->
@@ -373,76 +398,72 @@ parse_header(Name, Req=#http_req{p_headers=PHeaders}) ->
 	end.
 
 %% @doc Default values for semantic header parsing.
--spec parse_header_default(cowboy_http:header()) -> any().
-parse_header_default('Connection') -> [];
-parse_header_default('Transfer-Encoding') -> [<<"identity">>];
+-spec parse_header_default(binary()) -> any().
+parse_header_default(<<"connection">>) -> [];
+parse_header_default(<<"transfer-encoding">>) -> [<<"identity">>];
 parse_header_default(_Name) -> undefined.
 
 %% @doc Semantically parse headers.
 %%
 %% When the header is unknown, the value is returned directly without parsing.
--spec parse_header(cowboy_http:header(), Req, any())
+-spec parse_header(binary(), Req, any())
 	-> {ok, any(), Req} | {undefined, binary(), Req}
 	| {error, badarg} when Req::req().
-parse_header(Name, Req, Default) when Name =:= 'Accept' ->
+parse_header(Name, Req, Default) when Name =:= <<"accept">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:list(Value, fun cowboy_http:media_range/2)
 		end);
-parse_header(Name, Req, Default) when Name =:= 'Accept-Charset' ->
+parse_header(Name, Req, Default) when Name =:= <<"accept-charset">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:nonempty_list(Value, fun cowboy_http:conneg/2)
 		end);
-parse_header(Name, Req, Default) when Name =:= 'Accept-Encoding' ->
+parse_header(Name, Req, Default) when Name =:= <<"accept-encoding">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:list(Value, fun cowboy_http:conneg/2)
 		end);
-parse_header(Name, Req, Default) when Name =:= 'Accept-Language' ->
+parse_header(Name, Req, Default) when Name =:= <<"accept-language">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:nonempty_list(Value, fun cowboy_http:language_range/2)
 		end);
-parse_header(Name, Req, Default) when Name =:= 'Connection' ->
-	parse_header(Name, Req, Default,
-		fun (Value) ->
-			cowboy_http:nonempty_list(Value, fun cowboy_http:token_ci/2)
-		end);
-parse_header(Name, Req, Default) when Name =:= 'Content-Length' ->
+parse_header(Name, Req, Default) when Name =:= <<"content-length">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:digits(Value)
 		end);
-parse_header(Name, Req, Default) when Name =:= 'Content-Type' ->
+parse_header(Name, Req, Default) when Name =:= <<"content-type">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:content_type(Value)
 		end);
-parse_header(Name, Req, Default) when Name =:= <<"Expect">> ->
+parse_header(Name, Req, Default) when Name =:= <<"expect">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:nonempty_list(Value, fun cowboy_http:expectation/2)
 		end);
 parse_header(Name, Req, Default)
-		when Name =:= 'If-Match'; Name =:= 'If-None-Match' ->
+		when Name =:= <<"if-match">>; Name =:= <<"if-none-match">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:entity_tag_match(Value)
 		end);
 parse_header(Name, Req, Default)
-		when Name =:= 'If-Modified-Since'; Name =:= 'If-Unmodified-Since' ->
+		when Name =:= <<"if-modified-since">>;
+			Name =:= <<"if-unmodified-since">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:http_date(Value)
 		end);
 %% @todo Extension parameters.
-parse_header(Name, Req, Default) when Name =:= 'Transfer-Encoding' ->
+parse_header(Name, Req, Default) when Name =:= <<"transfer-encoding">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:nonempty_list(Value, fun cowboy_http:token_ci/2)
 		end);
-parse_header(Name, Req, Default) when Name =:= 'Upgrade' ->
+parse_header(Name, Req, Default) when Name =:= <<"upgrade">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
 			cowboy_http:nonempty_list(Value, fun cowboy_http:token_ci/2)
@@ -475,7 +496,7 @@ cookie(Name, Req) when is_binary(Name) ->
 -spec cookie(binary(), Req, Default)
 	-> {binary() | true | Default, Req} when Req::req(), Default::any().
 cookie(Name, Req=#http_req{cookies=undefined}, Default) when is_binary(Name) ->
-	case header('Cookie', Req) of
+	case header(<<"cookie">>, Req) of
 		{undefined, Req2} ->
 			{Default, Req2#http_req{cookies=[]}};
 		{RawCookie, Req2} ->
@@ -491,7 +512,7 @@ cookie(Name, Req, Default) ->
 %% @doc Return the full list of cookie values.
 -spec cookies(Req) -> {list({binary(), binary() | true}), Req} when Req::req().
 cookies(Req=#http_req{cookies=undefined}) ->
-	case header('Cookie', Req) of
+	case header(<<"cookie">>, Req) of
 		{undefined, Req2} ->
 			{[], Req2#http_req{cookies=[]}};
 		{RawCookie, Req2} ->
@@ -532,8 +553,8 @@ set_meta(Name, Value, Req=#http_req{meta=Meta}) ->
 %% @doc Return whether the request message has a body.
 -spec has_body(Req) -> {boolean(), Req} when Req::req().
 has_body(Req) ->
-	Has = lists:keymember('Content-Length', 1, Req#http_req.headers) orelse
-		lists:keymember('Transfer-Encoding', 1, Req#http_req.headers),
+	Has = lists:keymember(<<"content-length">>, 1, Req#http_req.headers) orelse
+		lists:keymember(<<"transfer-encoding">>, 1, Req#http_req.headers),
 	{Has, Req}.
 
 %% @doc Return the request message body length, if known.
@@ -542,11 +563,11 @@ has_body(Req) ->
 %% and the body hasn't been read at the time of the call.
 -spec body_length(Req) -> {undefined | non_neg_integer(), Req} when Req::req().
 body_length(Req) ->
-	case lists:keymember('Transfer-Encoding', 1, Req#http_req.headers) of
+	case lists:keymember(<<"transfer-encoding">>, 1, Req#http_req.headers) of
 		true ->
 			{undefined, Req};
 		false ->
-			{ok, Length, Req2} = parse_header('Content-Length', Req, 0),
+			{ok, Length, Req2} = parse_header(<<"content-length">>, Req, 0),
 			{Length, Req2}
 	end.
 
@@ -586,7 +607,7 @@ init_stream(TransferDecode, TransferState, ContentDecode, Req) ->
 	| {done, Req} | {error, atom()} when Req::req().
 stream_body(Req=#http_req{body_state=waiting,
 		version=Version, transport=Transport, socket=Socket}) ->
-	case parse_header(<<"Expect">>, Req) of
+	case parse_header(<<"expect">>, Req) of
 		{ok, [<<"100-continue">>], Req1} ->
 			HTTPVer = cowboy_http:version_to_binary(Version),
 			Transport:send(Socket,
@@ -594,7 +615,7 @@ stream_body(Req=#http_req{body_state=waiting,
 		{ok, undefined, Req1} ->
 			ok
 	end,
-	case parse_header('Transfer-Encoding', Req1) of
+	case parse_header(<<"transfer-encoding">>, Req1) of
 		{ok, [<<"chunked">>], Req2} ->
 			stream_body(Req2#http_req{body_state=
 				{stream, fun cowboy_http:te_chunked/2, {0, 0},
@@ -657,13 +678,13 @@ transfer_decode(Data, Req=#http_req{
 	-> Req when Req::req().
 transfer_decode_done(Length, Rest, Req=#http_req{
 		headers=Headers, p_headers=PHeaders}) ->
-	Headers2 = lists:keystore('Content-Length', 1, Headers,
-		{'Content-Length', list_to_binary(integer_to_list(Length))}),
+	Headers2 = lists:keystore(<<"content-length">>, 1, Headers,
+		{<<"content-length">>, list_to_binary(integer_to_list(Length))}),
 	%% At this point we just assume TEs were all decoded.
-	Headers3 = lists:keydelete('Transfer-Encoding', 1, Headers2),
-	PHeaders2 = lists:keystore('Content-Length', 1, PHeaders,
-		{'Content-Length', Length}),
-	PHeaders3 = lists:keydelete('Transfer-Encoding', 1, PHeaders2),
+	Headers3 = lists:keydelete(<<"transfer-encoding">>, 1, Headers2),
+	PHeaders2 = lists:keystore(<<"content-length">>, 1, PHeaders,
+		{<<"content-length">>, Length}),
+	PHeaders3 = lists:keydelete(<<"transfer-encoding">>, 1, PHeaders2),
 	Req#http_req{buffer=Rest, body_state=done,
 		headers=Headers3, p_headers=PHeaders3}.
 
@@ -712,17 +733,16 @@ skip_body(Req) ->
 		{error, Reason} -> {error, Reason}
 	end.
 
-%% @doc Return the full body sent with the reqest, parsed as an
+%% @doc Return the full body sent with the request, parsed as an
 %% application/x-www-form-urlencoded string. Essentially a POST query string.
 %% @todo We need an option to limit the size of the body for QS too.
 -spec body_qs(Req)
 	-> {ok, [{binary(), binary() | true}], Req} | {error, atom()}
 	when Req::req().
-body_qs(Req=#http_req{urldecode={URLDecFun, URLDecArg}}) ->
+body_qs(Req) ->
 	case body(Req) of
 		{ok, Body, Req2} ->
-			{ok, cowboy_http:x_www_form_urlencoded(
-				Body, fun(Bin) -> URLDecFun(Bin, URLDecArg) end), Req2};
+			{ok, cowboy_http:x_www_form_urlencoded(Body), Req2};
 		{error, Reason} ->
 			{error, Reason}
 	end.
@@ -743,9 +763,9 @@ body_qs(Req=#http_req{urldecode={URLDecFun, URLDecArg}}) ->
 		| {end_of_part | eof, Req} when Req::req().
 multipart_data(Req=#http_req{body_state=waiting}) ->
 	{ok, {<<"multipart">>, _SubType, Params}, Req2} =
-		parse_header('Content-Type', Req),
+		parse_header(<<"content-type">>, Req),
 	{_, Boundary} = lists:keyfind(<<"boundary">>, 1, Params),
-	{ok, Length, Req3} = parse_header('Content-Length', Req2),
+	{ok, Length, Req3} = parse_header(<<"content-length">>, Req2),
 	multipart_data(Req3, Length, {more, cowboy_multipart:parser(Boundary)});
 multipart_data(Req=#http_req{multipart={Length, Cont}}) ->
 	multipart_data(Req, Length, Cont());
@@ -796,11 +816,10 @@ set_resp_cookie(Name, Value, Options, Req) ->
 	set_resp_header(HeaderName, HeaderValue, Req).
 
 %% @doc Add a header to the response.
--spec set_resp_header(cowboy_http:header(), iodata(), Req)
+-spec set_resp_header(binary(), iodata(), Req)
 	-> Req when Req::req().
 set_resp_header(Name, Value, Req=#http_req{resp_headers=RespHeaders}) ->
-	NameBin = header_to_binary(Name),
-	Req#http_req{resp_headers=[{NameBin, Value}|RespHeaders]}.
+	Req#http_req{resp_headers=[{Name, Value}|RespHeaders]}.
 
 %% @doc Add a body to the response.
 %%
@@ -825,16 +844,15 @@ set_resp_body(Body, Req) ->
 %% `reply/3'.
 %%
 %% @see cowboy_req:transport/1.
--spec set_resp_body_fun(non_neg_integer(),
-	fun(() -> {sent, non_neg_integer()}), Req) -> Req when Req::req().
+-spec set_resp_body_fun(non_neg_integer(), resp_body_fun(), Req)
+	-> Req when Req::req().
 set_resp_body_fun(StreamLen, StreamFun, Req) ->
 	Req#http_req{resp_body={StreamLen, StreamFun}}.
 
 %% @doc Return whether the given header has been set for the response.
--spec has_resp_header(cowboy_http:header(), req()) -> boolean().
+-spec has_resp_header(binary(), req()) -> boolean().
 has_resp_header(Name, #http_req{resp_headers=RespHeaders}) ->
-	NameBin = header_to_binary(Name),
-	lists:keymember(NameBin, 1, RespHeaders).
+	lists:keymember(Name, 1, RespHeaders).
 
 %% @doc Return whether a body has been set for the response.
 -spec has_resp_body(req()) -> boolean().
@@ -844,7 +862,7 @@ has_resp_body(#http_req{resp_body=RespBody}) ->
 	iolist_size(RespBody) > 0.
 
 %% Remove a header previously set for the response.
--spec delete_resp_header(cowboy_http:header(), Req)
+-spec delete_resp_header(binary(), Req)
 	-> Req when Req::req().
 delete_resp_header(Name, Req=#http_req{resp_headers=RespHeaders}) ->
 	RespHeaders2 = lists:keydelete(Name, 1, RespHeaders),
@@ -862,29 +880,35 @@ reply(Status, Headers, Req=#http_req{resp_body=Body}) ->
 	reply(Status, Headers, Body, Req).
 
 %% @doc Send a reply to the client.
--spec reply(cowboy_http:status(), cowboy_http:headers(), iodata(), Req)
+-spec reply(cowboy_http:status(), cowboy_http:headers(),
+	iodata() | {non_neg_integer() | resp_body_fun()}, Req)
 	-> {ok, Req} when Req::req().
-reply(Status, Headers, Body, Req=#http_req{socket=Socket, transport=Transport,
+reply(Status, Headers, Body, Req=#http_req{
 		version=Version, connection=Connection,
 		method=Method, resp_state=waiting, resp_headers=RespHeaders}) ->
 	RespConn = response_connection(Headers, Connection),
-	ContentLen = case Body of {CL, _} -> CL; _ -> iolist_size(Body) end,
 	HTTP11Headers = case Version of
-		{1, 1} -> [{<<"Connection">>, atom_to_connection(Connection)}];
+		{1, 1} -> [{<<"connection">>, atom_to_connection(Connection)}];
 		_ -> []
 	end,
-	{ReplyType, Req2} = response(Status, Headers, RespHeaders,  [
-		{<<"Content-Length">>, integer_to_list(ContentLen)},
-		{<<"Date">>, cowboy_clock:rfc1123()},
-		{<<"Server">>, <<"Cowboy">>}
-	|HTTP11Headers], Req),
-	if	Method =:= 'HEAD' -> ok;
-		ReplyType =:= hook -> ok; %% Hook replied for us, stop there.
-		true ->
-			case Body of
-				{_, StreamFun} -> StreamFun();
-				_ -> Transport:send(Socket, Body)
-			end
+	case Body of
+		{ContentLength, BodyFun} ->
+			{RespType, Req2} = response(Status, Headers, RespHeaders, [
+					{<<"content-length">>, integer_to_list(ContentLength)},
+					{<<"date">>, cowboy_clock:rfc1123()},
+					{<<"server">>, <<"Cowboy">>}
+				|HTTP11Headers], <<>>, Req),
+			if	RespType =/= hook, Method =/= <<"HEAD">> -> BodyFun();
+				true -> ok
+			end;
+		_ ->
+			{_, Req2} = response(Status, Headers, RespHeaders, [
+					{<<"content-length">>, integer_to_list(iolist_size(Body))},
+					{<<"date">>, cowboy_clock:rfc1123()},
+					{<<"server">>, <<"Cowboy">>}
+				|HTTP11Headers],
+				case Method of <<"HEAD">> -> <<>>; _ -> Body end,
+				Req)
 	end,
 	{ok, Req2#http_req{connection=RespConn, resp_state=done,
 		resp_headers=[], resp_body= <<>>}}.
@@ -904,14 +928,14 @@ chunked_reply(Status, Headers, Req=#http_req{
 	RespConn = response_connection(Headers, Connection),
 	HTTP11Headers = case Version of
 		{1, 1} -> [
-			{<<"Connection">>, atom_to_connection(Connection)},
-			{<<"Transfer-Encoding">>, <<"chunked">>}];
+			{<<"connection">>, atom_to_connection(Connection)},
+			{<<"transfer-encoding">>, <<"chunked">>}];
 		_ -> []
 	end,
 	{_, Req2} = response(Status, Headers, RespHeaders, [
-		{<<"Date">>, cowboy_clock:rfc1123()},
-		{<<"Server">>, <<"Cowboy">>}
-	|HTTP11Headers], Req),
+		{<<"date">>, cowboy_clock:rfc1123()},
+		{<<"server">>, <<"Cowboy">>}
+	|HTTP11Headers], <<>>, Req),
 	{ok, Req2#http_req{connection=RespConn, resp_state=chunks,
 		resp_headers=[], resp_body= <<>>}}.
 
@@ -919,7 +943,7 @@ chunked_reply(Status, Headers, Req=#http_req{
 %%
 %% A chunked reply must have been initiated before calling this function.
 -spec chunk(iodata(), req()) -> ok | {error, atom()}.
-chunk(_Data, #http_req{socket=_Socket, transport=_Transport, method='HEAD'}) ->
+chunk(_Data, #http_req{method= <<"HEAD">>}) ->
 	ok;
 chunk(Data, #http_req{socket=Socket, transport=Transport, version={1, 0}}) ->
 	Transport:send(Socket, Data);
@@ -934,8 +958,8 @@ chunk(Data, #http_req{socket=Socket, transport=Transport, resp_state=chunks}) ->
 upgrade_reply(Status, Headers, Req=#http_req{
 		resp_state=waiting, resp_headers=RespHeaders}) ->
 	{_, Req2} = response(Status, Headers, RespHeaders, [
-		{<<"Connection">>, <<"Upgrade">>}
-	], Req),
+		{<<"connection">>, <<"Upgrade">>}
+	], <<>>, Req),
 	{ok, Req2#http_req{resp_state=done, resp_headers=[], resp_body= <<>>}}.
 
 %% @doc Ensure the response has been sent fully.
@@ -950,7 +974,7 @@ ensure_response(Req=#http_req{resp_state=waiting}, Status) ->
 	_ = reply(Status, [], [], Req),
 	ok;
 %% Terminate the chunked body for HTTP/1.1 only.
-ensure_response(#http_req{method='HEAD', resp_state=chunks}, _) ->
+ensure_response(#http_req{method= <<"HEAD">>, resp_state=chunks}, _) ->
 	ok;
 ensure_response(#http_req{version={1, 0}, resp_state=chunks}, _) ->
 	ok;
@@ -962,29 +986,70 @@ ensure_response(#http_req{socket=Socket, transport=Transport,
 %% Private setter/getter API.
 
 %% @private
--spec set_host(binary(), inet:port_number(), binary(), Req)
-	-> Req when Req::req().
-set_host(Host, Port, RawHost, Req=#http_req{headers=Headers}) ->
-	Req#http_req{host=Host, port=Port, headers=[{'Host', RawHost}|Headers]}.
+-spec get(atom(), req()) -> any(); ([atom()], req()) -> any().
+get(List, Req) when is_list(List) ->
+	[g(Atom, Req) || Atom <- List];
+get(Atom, Req) when is_atom(Atom) ->
+	g(Atom, Req).
+
+g(bindings, #http_req{bindings=Ret}) -> Ret;
+g(body_state, #http_req{body_state=Ret}) -> Ret;
+g(buffer, #http_req{buffer=Ret}) -> Ret;
+g(connection, #http_req{connection=Ret}) -> Ret;
+g(cookies, #http_req{cookies=Ret}) -> Ret;
+g(fragment, #http_req{fragment=Ret}) -> Ret;
+g(headers, #http_req{headers=Ret}) -> Ret;
+g(host, #http_req{host=Ret}) -> Ret;
+g(host_info, #http_req{host_info=Ret}) -> Ret;
+g(meta, #http_req{meta=Ret}) -> Ret;
+g(method, #http_req{method=Ret}) -> Ret;
+g(multipart, #http_req{multipart=Ret}) -> Ret;
+g(onresponse, #http_req{onresponse=Ret}) -> Ret;
+g(p_headers, #http_req{p_headers=Ret}) -> Ret;
+g(path, #http_req{path=Ret}) -> Ret;
+g(path_info, #http_req{path_info=Ret}) -> Ret;
+g(peer, #http_req{peer=Ret}) -> Ret;
+g(pid, #http_req{pid=Ret}) -> Ret;
+g(port, #http_req{port=Ret}) -> Ret;
+g(qs, #http_req{qs=Ret}) -> Ret;
+g(qs_vals, #http_req{qs_vals=Ret}) -> Ret;
+g(resp_body, #http_req{resp_body=Ret}) -> Ret;
+g(resp_headers, #http_req{resp_headers=Ret}) -> Ret;
+g(resp_state, #http_req{resp_state=Ret}) -> Ret;
+g(socket, #http_req{socket=Ret}) -> Ret;
+g(transport, #http_req{transport=Ret}) -> Ret;
+g(version, #http_req{version=Ret}) -> Ret.
 
 %% @private
--spec set_connection(binary(), Req) -> Req when Req::req().
-set_connection(RawConnection, Req=#http_req{headers=Headers}) ->
-	Req2 = Req#http_req{headers=[{'Connection', RawConnection}|Headers]},
-	{ok, ConnTokens, Req3} = parse_header('Connection', Req2),
-	ConnAtom = cowboy_http:connection_to_atom(ConnTokens),
-	Req3#http_req{connection=ConnAtom}.
-
-%% @private
--spec add_header(cowboy_http:header(), binary(), Req)
-	-> Req when Req::req().
-add_header(Name, Value, Req=#http_req{headers=Headers}) ->
-	Req#http_req{headers=[{Name, Value}|Headers]}.
-
-%% @private
--spec set_buffer(binary(), Req) -> Req when Req::req().
-set_buffer(Buffer, Req) ->
-	Req#http_req{buffer=Buffer}.
+-spec set([{atom(), any()}], Req) -> Req when Req::req().
+set([], Req) -> Req;
+set([{bindings, Val}|Tail], Req) -> set(Tail, Req#http_req{bindings=Val});
+set([{body_state, Val}|Tail], Req) -> set(Tail, Req#http_req{body_state=Val});
+set([{buffer, Val}|Tail], Req) -> set(Tail, Req#http_req{buffer=Val});
+set([{connection, Val}|Tail], Req) -> set(Tail, Req#http_req{connection=Val});
+set([{cookies, Val}|Tail], Req) -> set(Tail, Req#http_req{cookies=Val});
+set([{fragment, Val}|Tail], Req) -> set(Tail, Req#http_req{fragment=Val});
+set([{headers, Val}|Tail], Req) -> set(Tail, Req#http_req{headers=Val});
+set([{host, Val}|Tail], Req) -> set(Tail, Req#http_req{host=Val});
+set([{host_info, Val}|Tail], Req) -> set(Tail, Req#http_req{host_info=Val});
+set([{meta, Val}|Tail], Req) -> set(Tail, Req#http_req{meta=Val});
+set([{method, Val}|Tail], Req) -> set(Tail, Req#http_req{method=Val});
+set([{multipart, Val}|Tail], Req) -> set(Tail, Req#http_req{multipart=Val});
+set([{onresponse, Val}|Tail], Req) -> set(Tail, Req#http_req{onresponse=Val});
+set([{p_headers, Val}|Tail], Req) -> set(Tail, Req#http_req{p_headers=Val});
+set([{path, Val}|Tail], Req) -> set(Tail, Req#http_req{path=Val});
+set([{path_info, Val}|Tail], Req) -> set(Tail, Req#http_req{path_info=Val});
+set([{peer, Val}|Tail], Req) -> set(Tail, Req#http_req{peer=Val});
+set([{pid, Val}|Tail], Req) -> set(Tail, Req#http_req{pid=Val});
+set([{port, Val}|Tail], Req) -> set(Tail, Req#http_req{port=Val});
+set([{qs, Val}|Tail], Req) -> set(Tail, Req#http_req{qs=Val});
+set([{qs_vals, Val}|Tail], Req) -> set(Tail, Req#http_req{qs_vals=Val});
+set([{resp_body, Val}|Tail], Req) -> set(Tail, Req#http_req{resp_body=Val});
+set([{resp_headers, Val}|Tail], Req) -> set(Tail, Req#http_req{resp_headers=Val});
+set([{resp_state, Val}|Tail], Req) -> set(Tail, Req#http_req{resp_state=Val});
+set([{socket, Val}|Tail], Req) -> set(Tail, Req#http_req{socket=Val});
+set([{transport, Val}|Tail], Req) -> set(Tail, Req#http_req{transport=Val});
+set([{version, Val}|Tail], Req) -> set(Tail, Req#http_req{version=Val}).
 
 %% @private
 -spec set_bindings(cowboy_dispatcher:tokens(), cowboy_dispatcher:tokens(),
@@ -992,21 +1057,6 @@ set_buffer(Buffer, Req) ->
 set_bindings(HostInfo, PathInfo, Bindings, Req) ->
 	Req#http_req{host_info=HostInfo, path_info=PathInfo,
 		bindings=Bindings}.
-
-%% @private
--spec get_resp_state(req()) -> locked | waiting | chunks | done.
-get_resp_state(#http_req{resp_state=RespState}) ->
-	RespState.
-
-%% @private
--spec get_buffer(req()) -> binary().
-get_buffer(#http_req{buffer=Buffer}) ->
-	Buffer.
-
-%% @private
--spec get_connection(req()) -> keepalive | close.
-get_connection(#http_req{connection=Connection}) ->
-	Connection.
 
 %% Misc API.
 
@@ -1050,9 +1100,9 @@ transport(#http_req{transport=Transport, socket=Socket}) ->
 %% Internal.
 
 -spec response(cowboy_http:status(), cowboy_http:headers(),
-	cowboy_http:headers(), cowboy_http:headers(), Req)
+	cowboy_http:headers(), cowboy_http:headers(), iodata(), Req)
 	-> {normal | hook, Req} when Req::req().
-response(Status, Headers, RespHeaders, DefaultHeaders, Req=#http_req{
+response(Status, Headers, RespHeaders, DefaultHeaders, Body, Req=#http_req{
 		socket=Socket, transport=Transport, version=Version,
 		pid=ReqPid, onresponse=OnResponse}) ->
 	FullHeaders = response_merge_headers(Headers, RespHeaders, DefaultHeaders),
@@ -1070,7 +1120,7 @@ response(Status, Headers, RespHeaders, DefaultHeaders, Req=#http_req{
 				(status(Status))/binary, "\r\n" >>,
 			HeaderLines = [[Key, <<": ">>, Value, <<"\r\n">>]
 				|| {Key, Value} <- FullHeaders],
-			Transport:send(Socket, [StatusLine, HeaderLines, <<"\r\n">>]),
+			Transport:send(Socket, [StatusLine, HeaderLines, <<"\r\n">>, Body]),
 			ReqPid ! {?MODULE, resp_sent},
 			normal;
 		_ ->
@@ -1084,25 +1134,17 @@ response_connection([], Connection) ->
 	Connection;
 response_connection([{Name, Value}|Tail], Connection) ->
 	case Name of
-		'Connection' -> response_connection_parse(Value);
-		Name when is_atom(Name) -> response_connection(Tail, Connection);
-		Name ->
-			Name2 = cowboy_bstr:to_lower(Name),
-			case Name2 of
-				<<"connection">> -> response_connection_parse(Value);
-				_Any -> response_connection(Tail, Connection)
-			end
+		<<"connection">> ->
+			Tokens = parse_connection_before(Value, []),
+			connection_to_atom(Tokens);
+		_ ->
+			response_connection(Tail, Connection)
 	end.
-
--spec response_connection_parse(binary()) -> keepalive | close.
-response_connection_parse(ReplyConn) ->
-	Tokens = cowboy_http:nonempty_list(ReplyConn, fun cowboy_http:token/2),
-	cowboy_http:connection_to_atom(Tokens).
 
 -spec response_merge_headers(cowboy_http:headers(), cowboy_http:headers(),
 	cowboy_http:headers()) -> cowboy_http:headers().
 response_merge_headers(Headers, RespHeaders, DefaultHeaders) ->
-	Headers2 = [{header_to_binary(Key), Value} || {Key, Value} <- Headers],
+	Headers2 = [{Key, Value} || {Key, Value} <- Headers],
 	merge_headers(
 		merge_headers(Headers2, RespHeaders),
 		DefaultHeaders).
@@ -1114,7 +1156,7 @@ merge_headers(Headers, []) ->
 merge_headers(Headers, [{Name, Value}|Tail]) ->
 	Headers2 = case lists:keymember(Name, 1, Headers) of
 		true -> Headers;
-		false -> Headers ++ [{Name, Value}]
+		false -> [{Name, Value}|Headers]
 	end,
 	merge_headers(Headers2, Tail).
 
@@ -1124,6 +1166,74 @@ atom_to_connection(keepalive) ->
 	<<"keep-alive">>;
 atom_to_connection(close) ->
 	<<"close">>.
+
+%% Optimized parsing functions for the Connection header.
+parse_connection_before(<<>>, Acc) ->
+	lists:reverse(Acc);
+parse_connection_before(<< C, Rest/bits >>, Acc)
+		when C =:= $,; C =:= $\s; C =:= $\t ->
+	parse_connection_before(Rest, Acc);
+parse_connection_before(Buffer, Acc) ->
+	parse_connection(Buffer, Acc, <<>>).
+
+%% An evil block of code appeared!
+parse_connection(<<>>, Acc, <<>>) ->
+	lists:reverse(Acc);
+parse_connection(<<>>, Acc, Token) ->
+	lists:reverse([Token|Acc]);
+parse_connection(<< C, Rest/bits >>, Acc, Token)
+		when C =:= $,; C =:= $\s; C =:= $\t ->
+	parse_connection_after(Rest, [Token|Acc]);
+parse_connection(<< C, Rest/bits >>, Acc, Token) ->
+	case C of
+		$A -> parse_connection(Rest, Acc, << Token/binary, $a >>);
+		$B -> parse_connection(Rest, Acc, << Token/binary, $b >>);
+		$C -> parse_connection(Rest, Acc, << Token/binary, $c >>);
+		$D -> parse_connection(Rest, Acc, << Token/binary, $d >>);
+		$E -> parse_connection(Rest, Acc, << Token/binary, $e >>);
+		$F -> parse_connection(Rest, Acc, << Token/binary, $f >>);
+		$G -> parse_connection(Rest, Acc, << Token/binary, $g >>);
+		$H -> parse_connection(Rest, Acc, << Token/binary, $h >>);
+		$I -> parse_connection(Rest, Acc, << Token/binary, $i >>);
+		$J -> parse_connection(Rest, Acc, << Token/binary, $j >>);
+		$K -> parse_connection(Rest, Acc, << Token/binary, $k >>);
+		$L -> parse_connection(Rest, Acc, << Token/binary, $l >>);
+		$M -> parse_connection(Rest, Acc, << Token/binary, $m >>);
+		$N -> parse_connection(Rest, Acc, << Token/binary, $n >>);
+		$O -> parse_connection(Rest, Acc, << Token/binary, $o >>);
+		$P -> parse_connection(Rest, Acc, << Token/binary, $p >>);
+		$Q -> parse_connection(Rest, Acc, << Token/binary, $q >>);
+		$R -> parse_connection(Rest, Acc, << Token/binary, $r >>);
+		$S -> parse_connection(Rest, Acc, << Token/binary, $s >>);
+		$T -> parse_connection(Rest, Acc, << Token/binary, $t >>);
+		$U -> parse_connection(Rest, Acc, << Token/binary, $u >>);
+		$V -> parse_connection(Rest, Acc, << Token/binary, $v >>);
+		$W -> parse_connection(Rest, Acc, << Token/binary, $w >>);
+		$X -> parse_connection(Rest, Acc, << Token/binary, $x >>);
+		$Y -> parse_connection(Rest, Acc, << Token/binary, $y >>);
+		$Z -> parse_connection(Rest, Acc, << Token/binary, $z >>);
+		C -> parse_connection(Rest, Acc, << Token/binary, C >>)
+	end.
+
+parse_connection_after(<<>>, Acc) ->
+	lists:reverse(Acc);
+parse_connection_after(<< $,, Rest/bits >>, Acc) ->
+	parse_connection_before(Rest, Acc);
+parse_connection_after(<< C, Rest/bits >>, Acc)
+		when C =:= $\s; C =:= $\t ->
+	parse_connection_after(Rest, Acc).
+
+%% @doc Walk through a tokens list and return whether
+%% the connection is keepalive or closed.
+%%
+%% We don't match on "keep-alive" since it is the default value.
+-spec connection_to_atom([binary()]) -> keepalive | close.
+connection_to_atom([]) ->
+	keepalive;
+connection_to_atom([<<"close">>|_]) ->
+	close;
+connection_to_atom([_|Tail]) ->
+	connection_to_atom(Tail).
 
 -spec status(cowboy_http:status()) -> binary().
 status(100) -> <<"100 Continue">>;
@@ -1185,61 +1295,6 @@ status(510) -> <<"510 Not Extended">>;
 status(511) -> <<"511 Network Authentication Required">>;
 status(B) when is_binary(B) -> B.
 
--spec header_to_binary(cowboy_http:header()) -> binary().
-header_to_binary('Cache-Control') -> <<"Cache-Control">>;
-header_to_binary('Connection') -> <<"Connection">>;
-header_to_binary('Date') -> <<"Date">>;
-header_to_binary('Pragma') -> <<"Pragma">>;
-header_to_binary('Transfer-Encoding') -> <<"Transfer-Encoding">>;
-header_to_binary('Upgrade') -> <<"Upgrade">>;
-header_to_binary('Via') -> <<"Via">>;
-header_to_binary('Accept') -> <<"Accept">>;
-header_to_binary('Accept-Charset') -> <<"Accept-Charset">>;
-header_to_binary('Accept-Encoding') -> <<"Accept-Encoding">>;
-header_to_binary('Accept-Language') -> <<"Accept-Language">>;
-header_to_binary('Authorization') -> <<"Authorization">>;
-header_to_binary('From') -> <<"From">>;
-header_to_binary('Host') -> <<"Host">>;
-header_to_binary('If-Modified-Since') -> <<"If-Modified-Since">>;
-header_to_binary('If-Match') -> <<"If-Match">>;
-header_to_binary('If-None-Match') -> <<"If-None-Match">>;
-header_to_binary('If-Range') -> <<"If-Range">>;
-header_to_binary('If-Unmodified-Since') -> <<"If-Unmodified-Since">>;
-header_to_binary('Max-Forwards') -> <<"Max-Forwards">>;
-header_to_binary('Proxy-Authorization') -> <<"Proxy-Authorization">>;
-header_to_binary('Range') -> <<"Range">>;
-header_to_binary('Referer') -> <<"Referer">>;
-header_to_binary('User-Agent') -> <<"User-Agent">>;
-header_to_binary('Age') -> <<"Age">>;
-header_to_binary('Location') -> <<"Location">>;
-header_to_binary('Proxy-Authenticate') -> <<"Proxy-Authenticate">>;
-header_to_binary('Public') -> <<"Public">>;
-header_to_binary('Retry-After') -> <<"Retry-After">>;
-header_to_binary('Server') -> <<"Server">>;
-header_to_binary('Vary') -> <<"Vary">>;
-header_to_binary('Warning') -> <<"Warning">>;
-header_to_binary('Www-Authenticate') -> <<"Www-Authenticate">>;
-header_to_binary('Allow') -> <<"Allow">>;
-header_to_binary('Content-Base') -> <<"Content-Base">>;
-header_to_binary('Content-Encoding') -> <<"Content-Encoding">>;
-header_to_binary('Content-Language') -> <<"Content-Language">>;
-header_to_binary('Content-Length') -> <<"Content-Length">>;
-header_to_binary('Content-Location') -> <<"Content-Location">>;
-header_to_binary('Content-Md5') -> <<"Content-Md5">>;
-header_to_binary('Content-Range') -> <<"Content-Range">>;
-header_to_binary('Content-Type') -> <<"Content-Type">>;
-header_to_binary('Etag') -> <<"Etag">>;
-header_to_binary('Expires') -> <<"Expires">>;
-header_to_binary('Last-Modified') -> <<"Last-Modified">>;
-header_to_binary('Accept-Ranges') -> <<"Accept-Ranges">>;
-header_to_binary('Set-Cookie') -> <<"Set-Cookie">>;
-header_to_binary('Set-Cookie2') -> <<"Set-Cookie2">>;
-header_to_binary('X-Forwarded-For') -> <<"X-Forwarded-For">>;
-header_to_binary('Cookie') -> <<"Cookie">>;
-header_to_binary('Keep-Alive') -> <<"Keep-Alive">>;
-header_to_binary('Proxy-Connection') -> <<"Proxy-Connection">>;
-header_to_binary(B) when is_binary(B) -> B.
-
 %% Tests.
 
 -ifdef(TEST).
@@ -1247,25 +1302,45 @@ header_to_binary(B) when is_binary(B) -> B.
 url_test() ->
 	{<<"http://localhost/path">>, _ } =
 		url(#http_req{transport=ranch_tcp, host= <<"localhost">>, port=80,
-			path= <<"/path">>, qs= <<>>, pid=self()}),
+			path= <<"/path">>, qs= <<>>, fragment= <<>>, pid=self()}),
 	{<<"http://localhost:443/path">>, _} =
 		url(#http_req{transport=ranch_tcp, host= <<"localhost">>, port=443,
-			path= <<"/path">>, qs= <<>>, pid=self()}),
+			path= <<"/path">>, qs= <<>>, fragment= <<>>, pid=self()}),
 	{<<"http://localhost:8080/path">>, _} =
 		url(#http_req{transport=ranch_tcp, host= <<"localhost">>, port=8080,
-			path= <<"/path">>, qs= <<>>, pid=self()}),
+			path= <<"/path">>, qs= <<>>, fragment= <<>>, pid=self()}),
 	{<<"http://localhost:8080/path?dummy=2785">>, _} =
 		url(#http_req{transport=ranch_tcp, host= <<"localhost">>, port=8080,
-			path= <<"/path">>, qs= <<"dummy=2785">>, pid=self()}),
+			path= <<"/path">>, qs= <<"dummy=2785">>, fragment= <<>>,
+			pid=self()}),
+	{<<"http://localhost:8080/path?dummy=2785#fragment">>, _} =
+		url(#http_req{transport=ranch_tcp, host= <<"localhost">>, port=8080,
+			path= <<"/path">>, qs= <<"dummy=2785">>, fragment= <<"fragment">>,
+			pid=self()}),
 	{<<"https://localhost/path">>, _} =
 		url(#http_req{transport=ranch_ssl, host= <<"localhost">>, port=443,
-			path= <<"/path">>, qs= <<>>, pid=self()}),
+			path= <<"/path">>, qs= <<>>, fragment= <<>>, pid=self()}),
 	{<<"https://localhost:8443/path">>, _} =
 		url(#http_req{transport=ranch_ssl, host= <<"localhost">>, port=8443,
-			path= <<"/path">>, qs= <<>>, pid=self()}),
+			path= <<"/path">>, qs= <<>>, fragment= <<>>, pid=self()}),
 	{<<"https://localhost:8443/path?dummy=2785">>, _} =
 		url(#http_req{transport=ranch_ssl, host= <<"localhost">>, port=8443,
-			path= <<"/path">>, qs= <<"dummy=2785">>, pid=self()}),
+			path= <<"/path">>, qs= <<"dummy=2785">>, fragment= <<>>,
+			pid=self()}),
+	{<<"https://localhost:8443/path?dummy=2785#fragment">>, _} =
+		url(#http_req{transport=ranch_ssl, host= <<"localhost">>, port=8443,
+			path= <<"/path">>, qs= <<"dummy=2785">>, fragment= <<"fragment">>,
+			pid=self()}),
 	ok.
+
+connection_to_atom_test_() ->
+	%% {Tokens, Result}
+	Tests = [
+		{[<<"close">>], close},
+		{[<<"keep-alive">>], keepalive},
+		{[<<"keep-alive">>, <<"upgrade">>], keepalive}
+	],
+	[{lists:flatten(io_lib:format("~p", [T])),
+		fun() -> R = connection_to_atom(T) end} || {T, R} <- Tests].
 
 -endif.
