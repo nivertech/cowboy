@@ -401,7 +401,6 @@ parse_header(Name, Req=#http_req{p_headers=PHeaders}) ->
 -spec parse_header_default(binary()) -> any().
 parse_header_default(<<"connection">>) -> [];
 parse_header_default(<<"transfer-encoding">>) -> [<<"parse_header_default">>];
-% TODO - REMOVE LATER identity(<<"Sec-Websocket-Protocol">>) -> [];
 parse_header_default(_Name) -> undefined.
 
 %% @doc Semantically parse headers.
