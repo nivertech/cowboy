@@ -400,7 +400,7 @@ parse_header(Name, Req=#http_req{p_headers=PHeaders}) ->
 %% @doc Default values for semantic header parsing.
 -spec parse_header_default(binary()) -> any().
 parse_header_default(<<"connection">>) -> [];
-parse_header_default(<<"transfer-encoding">>) -> [<<"parse_header_default">>];
+parse_header_default(<<"transfer-encoding">>) -> [<<"identity">>];
 parse_header_default(_Name) -> undefined.
 
 %% @doc Semantically parse headers.
