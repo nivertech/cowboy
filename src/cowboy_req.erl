@@ -400,7 +400,8 @@ parse_header(Name, Req=#http_req{p_headers=PHeaders}) ->
 %% @doc Default values for semantic header parsing.
 -spec parse_header_default(binary()) -> any().
 parse_header_default(<<"connection">>) -> [];
-parse_header_default(<<"transfer-encoding">>) -> [<<"identity">>];
+parse_header_default(<<"transfer-encoding">>) -> [<<"parse_header_default">>];
+% TODO - REMOVE LATER identity(<<"Sec-Websocket-Protocol">>) -> [];
 parse_header_default(_Name) -> undefined.
 
 %% @doc Semantically parse headers.
@@ -468,6 +469,11 @@ parse_header(Name, Req, Default) when Name =:= <<"upgrade">> ->
 		fun (Value) ->
 			cowboy_http:nonempty_list(Value, fun cowboy_http:token_ci/2)
 		end);
+parse_header(Name, Req, Default) when Name =:= <<"Sec-Websocket-Protocol">> ->
+    parse_header(Name, Req, Default,
+        fun (Value) ->
+            cowboy_http:nonempty_list(Value, fun cowboy_http:token_ci/2)
+        end);
 parse_header(Name, Req, Default) ->
 	{Value, Req2} = header(Name, Req, Default),
 	{undefined, Value, Req2}.
