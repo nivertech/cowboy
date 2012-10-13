@@ -399,7 +399,6 @@ parse_header(Name, Req=#http_req{p_headers=PHeaders}) ->
 
 %% @doc Default values for semantic header parsing.
 -spec parse_header_default(binary()) -> any().
-parse_header_default(<<"connection">>) -> [];
 parse_header_default(<<"transfer-encoding">>) -> [<<"identity">>];
 parse_header_default(_Name) -> undefined.
 
@@ -430,15 +429,9 @@ parse_header(Name, Req, Default) when Name =:= <<"accept-language">> ->
 			cowboy_http:nonempty_list(Value, fun cowboy_http:language_range/2)
 		end);
 parse_header(Name, Req, Default) when Name =:= <<"content-length">> ->
-	parse_header(Name, Req, Default,
-		fun (Value) ->
-			cowboy_http:digits(Value)
-		end);
+	parse_header(Name, Req, Default, fun cowboy_http:digits/1);
 parse_header(Name, Req, Default) when Name =:= <<"content-type">> ->
-	parse_header(Name, Req, Default,
-		fun (Value) ->
-			cowboy_http:content_type(Value)
-		end);
+	parse_header(Name, Req, Default, fun cowboy_http:content_type/1);
 parse_header(Name, Req, Default) when Name =:= <<"expect">> ->
 	parse_header(Name, Req, Default,
 		fun (Value) ->
@@ -446,17 +439,11 @@ parse_header(Name, Req, Default) when Name =:= <<"expect">> ->
 		end);
 parse_header(Name, Req, Default)
 		when Name =:= <<"if-match">>; Name =:= <<"if-none-match">> ->
-	parse_header(Name, Req, Default,
-		fun (Value) ->
-			cowboy_http:entity_tag_match(Value)
-		end);
+	parse_header(Name, Req, Default, fun cowboy_http:entity_tag_match/1);
 parse_header(Name, Req, Default)
 		when Name =:= <<"if-modified-since">>;
 			Name =:= <<"if-unmodified-since">> ->
-	parse_header(Name, Req, Default,
-		fun (Value) ->
-			cowboy_http:http_date(Value)
-		end);
+	parse_header(Name, Req, Default, fun cowboy_http:http_date/1);
 %% @todo Extension parameters.
 parse_header(Name, Req, Default) when Name =:= <<"transfer-encoding">> ->
 	parse_header(Name, Req, Default,
@@ -1108,7 +1095,7 @@ response(Status, Headers, RespHeaders, DefaultHeaders, Body, Req=#http_req{
 	FullHeaders = response_merge_headers(Headers, RespHeaders, DefaultHeaders),
 	Req2 = case OnResponse of
 		undefined -> Req;
-		OnResponse -> OnResponse(Status, FullHeaders,
+		OnResponse -> OnResponse(Status, FullHeaders, Body,
 			%% Don't call 'onresponse' from the hook itself.
 			Req#http_req{resp_headers=[], resp_body= <<>>,
 				onresponse=undefined})

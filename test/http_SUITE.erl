@@ -128,6 +128,7 @@ groups() ->
 
 init_per_suite(Config) ->
 	application:start(inets),
+	application:start(crypto),
 	application:start(ranch),
 	application:start(cowboy),
 	Config.
@@ -135,6 +136,7 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
 	application:stop(cowboy),
 	application:stop(ranch),
+	application:stop(crypto),
 	application:stop(inets),
 	ok.
 
@@ -159,7 +161,6 @@ init_per_group(https, Config) ->
 		{password, "cowboy"}
 	],
 	Config1 = init_static_dir(Config),
-	application:start(crypto),
 	application:start(public_key),
 	application:start(ssl),
 	{ok, _} = cowboy:start_https(https, 100, Opts ++ [{port, Port}], [
@@ -188,7 +189,7 @@ init_per_group(onresponse, Config) ->
 	{ok, _} = cowboy:start_http(onresponse, 100, [{port, Port}], [
 		{dispatch, init_dispatch(Config)},
 		{max_keepalive, 50},
-		{onresponse, fun onresponse_hook/3},
+		{onresponse, fun onresponse_hook/4},
 		{timeout, 500}
 	]),
 	{ok, Client} = cowboy_client:init([]),
@@ -199,7 +200,6 @@ end_per_group(https, Config) ->
 	cowboy:stop_listener(https),
 	application:stop(ssl),
 	application:stop(public_key),
-	application:stop(crypto),
 	end_static_dir(Config),
 	ok;
 end_per_group(http, Config) ->
@@ -623,7 +623,7 @@ onresponse_reply(Config) ->
 	{error, closed} = cowboy_client:response_body(Client3).
 
 %% Hook for the above onresponse tests.
-onresponse_hook(_, Headers, Req) ->
+onresponse_hook(_, Headers, _, Req) ->
 	{ok, Req2} = cowboy_req:reply(
 		<<"777 Lucky">>, [{<<"x-hook">>, <<"onresponse">>}|Headers], Req),
 	Req2.
