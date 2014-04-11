@@ -1,4 +1,4 @@
-%% Copyright (c) 2011-2012, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2011-2014, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -12,24 +12,42 @@
 %% ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 %% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-%% @doc Binary string manipulation.
 -module(cowboy_bstr).
 
 %% Binary strings.
+-export([capitalize_token/1]).
 -export([to_lower/1]).
+-export([to_upper/1]).
 
 %% Characters.
 -export([char_to_lower/1]).
 -export([char_to_upper/1]).
 
-%% @doc Convert a binary string to lowercase.
--spec to_lower(binary()) -> binary().
-to_lower(L) ->
-	<< << (char_to_lower(C)) >> || << C >> <= L >>.
+%% The first letter and all letters after a dash are capitalized.
+%% This is the form seen for header names in the HTTP/1.1 RFC and
+%% others. Note that using this form isn't required, as header names
+%% are case insensitive, and it is only provided for use with eventual
+%% badly implemented clients.
+-spec capitalize_token(B) -> B when B::binary().
+capitalize_token(B) ->
+	capitalize_token(B, true, <<>>).
+capitalize_token(<<>>, _, Acc) ->
+	Acc;
+capitalize_token(<< $-, Rest/bits >>, _, Acc) ->
+	capitalize_token(Rest, true, << Acc/binary, $- >>);
+capitalize_token(<< C, Rest/bits >>, true, Acc) ->
+	capitalize_token(Rest, false, << Acc/binary, (char_to_upper(C)) >>);
+capitalize_token(<< C, Rest/bits >>, false, Acc) ->
+	capitalize_token(Rest, false, << Acc/binary, (char_to_lower(C)) >>).
 
-%% @doc Convert [A-Z] characters to lowercase.
-%% @end
-%% We gain noticeable speed by matching each value directly.
+-spec to_lower(B) -> B when B::binary().
+to_lower(B) ->
+	<< << (char_to_lower(C)) >> || << C >> <= B >>.
+
+-spec to_upper(B) -> B when B::binary().
+to_upper(B) ->
+	<< << (char_to_upper(C)) >> || << C >> <= B >>.
+
 -spec char_to_lower(char()) -> char().
 char_to_lower($A) -> $a;
 char_to_lower($B) -> $b;
@@ -59,7 +77,6 @@ char_to_lower($Y) -> $y;
 char_to_lower($Z) -> $z;
 char_to_lower(Ch) -> Ch.
 
-%% @doc Convert [a-z] characters to uppercase.
 -spec char_to_upper(char()) -> char().
 char_to_upper($a) -> $A;
 char_to_upper($b) -> $B;
@@ -88,3 +105,19 @@ char_to_upper($x) -> $X;
 char_to_upper($y) -> $Y;
 char_to_upper($z) -> $Z;
 char_to_upper(Ch) -> Ch.
+
+%% Tests.
+
+-ifdef(TEST).
+capitalize_token_test_() ->
+	Tests = [
+		{<<"heLLo-woRld">>, <<"Hello-World">>},
+		{<<"Sec-Websocket-Version">>, <<"Sec-Websocket-Version">>},
+		{<<"Sec-WebSocket-Version">>, <<"Sec-Websocket-Version">>},
+		{<<"sec-websocket-version">>, <<"Sec-Websocket-Version">>},
+		{<<"SEC-WEBSOCKET-VERSION">>, <<"Sec-Websocket-Version">>},
+		{<<"Sec-WebSocket--Version">>, <<"Sec-Websocket--Version">>},
+		{<<"Sec-WebSocket---Version">>, <<"Sec-Websocket---Version">>}
+	],
+	[{H, fun() -> R = capitalize_token(H) end} || {H, R} <- Tests].
+-endif.

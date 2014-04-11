@@ -2,58 +2,32 @@
 
 PROJECT = cowboy
 
-DIALYZER = dialyzer
-REBAR = rebar
+# Options.
 
-all: app
+ERLC_OPTS ?= -Werror +debug_info +warn_export_all +warn_export_vars \
+	+warn_shadow_vars +warn_obsolete_guard +warn_missing_spec
+COMPILE_FIRST = cowboy_middleware cowboy_sub_protocol
+CT_SUITES = eunit http spdy ws
+PLT_APPS = crypto public_key ssl
 
-# Application.
+# Dependencies.
 
-deps/ranch:
-	@$(REBAR) get-deps
+DEPS = cowlib ranch
+dep_cowlib = pkg://cowlib 0.6.1
+dep_ranch = pkg://ranch 0.9.0
 
-app: deps/ranch
-	@$(REBAR) compile
+TEST_DEPS = ct_helper gun
+dep_ct_helper = https://github.com/extend/ct_helper.git master
+dep_gun = pkg://gun master
 
-clean:
-	@$(REBAR) clean
-	rm -f test/*.beam
-	rm -f erl_crash.dump
+# Standard targets.
 
-docs: clean-docs
-	@$(REBAR) doc skip_deps=true
+include erlang.mk
 
-clean-docs:
-	rm -f doc/*.css
-	rm -f doc/*.html
-	rm -f doc/*.png
-	rm -f doc/edoc-info
+# Extra targets.
 
-# Tests.
+.PHONY: autobahn
 
-deps/proper:
-	@$(REBAR) -C rebar.tests.config get-deps
-	cd deps/proper && $(REBAR) compile
-
-tests: clean deps/proper app eunit ct
-
-inttests: clean deps/proper app eunit intct
-
-eunit:
-	@$(REBAR) -C rebar.tests.config eunit skip_deps=true
-
-ct:
-	@$(REBAR) -C rebar.tests.config ct skip_deps=true suites=http,ws
-
-intct:
-	@$(REBAR) -C rebar.tests.config ct skip_deps=true suites=http,ws,autobahn
-
-# Dialyzer.
-
-build-plt:
-	@$(DIALYZER) --build_plt --output_plt .$(PROJECT).plt \
-		--apps kernel stdlib sasl inets crypto public_key ssl deps/*
-
-dialyze:
-	@$(DIALYZER) --src src --plt .$(PROJECT).plt --no_native \
-		-Werror_handling -Wrace_conditions -Wunmatched_returns # -Wunderspecs
+autobahn: clean clean-deps deps app build-tests
+	@mkdir -p logs/
+	@$(CT_RUN) -suite autobahn_SUITE

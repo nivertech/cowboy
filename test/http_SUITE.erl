@@ -1,4 +1,4 @@
-%% Copyright (c) 2011-2012, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2011-2014, Loïc Hoguin <essen@ninenines.eu>
 %% Copyright (c) 2011, Anthony Ramine <nox@dev-extend.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
@@ -14,64 +14,24 @@
 %% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 -module(http_SUITE).
+-compile(export_all).
 
 -include_lib("common_test/include/ct.hrl").
 
 %% ct.
--export([all/0]).
--export([groups/0]).
--export([init_per_suite/1]).
--export([end_per_suite/1]).
--export([init_per_group/2]).
--export([end_per_group/2]).
-
-%% Tests.
--export([check_raw_status/1]).
--export([check_status/1]).
--export([chunked_response/1]).
--export([echo_body/1]).
--export([error_chain_handle_after_reply/1]).
--export([error_chain_handle_before_reply/1]).
--export([error_handle_after_reply/1]).
--export([error_init_after_reply/1]).
--export([error_init_reply_handle_error/1]).
--export([headers_dupe/1]).
--export([http10_chunkless/1]).
--export([http10_hostless/1]).
--export([keepalive_max/1]).
--export([keepalive_nl/1]).
--export([multipart/1]).
--export([nc_rand/1]).
--export([nc_zero/1]).
--export([onrequest/1]).
--export([onrequest_reply/1]).
--export([onresponse_crash/1]).
--export([onresponse_reply/1]).
--export([pipeline/1]).
--export([rest_keepalive/1]).
--export([rest_keepalive_post/1]).
--export([rest_nodelete/1]).
--export([rest_resource_etags/1]).
--export([rest_resource_etags_if_none_match/1]).
--export([set_resp_body/1]).
--export([set_resp_header/1]).
--export([set_resp_overwrite/1]).
--export([static_attribute_etag/1]).
--export([static_function_etag/1]).
--export([static_mimetypes_function/1]).
--export([static_specify_file/1]).
--export([static_specify_file_catchall/1]).
--export([static_test_file/1]).
--export([static_test_file_css/1]).
--export([stream_body_set_resp/1]).
--export([te_chunked/1]).
--export([te_chunked_delayed/1]).
--export([te_identity/1]).
-
-%% ct.
 
 all() ->
-	[{group, http}, {group, https}, {group, onrequest}, {group, onresponse}].
+	[
+		{group, http},
+		{group, https},
+		{group, http_compress},
+		{group, https_compress},
+		{group, onrequest},
+		{group, onresponse},
+		{group, onresponse_capitalize},
+		{group, parse_host},
+		{group, set_env}
+	].
 
 groups() ->
 	Tests = [
@@ -79,6 +39,9 @@ groups() ->
 		check_status,
 		chunked_response,
 		echo_body,
+		echo_body_max_length,
+		echo_body_qs,
+		echo_body_qs_max_length,
 		error_chain_handle_after_reply,
 		error_chain_handle_before_reply,
 		error_handle_after_reply,
@@ -89,18 +52,33 @@ groups() ->
 		http10_hostless,
 		keepalive_max,
 		keepalive_nl,
+		keepalive_stream_loop,
 		multipart,
+		multipart_large,
 		nc_rand,
 		nc_zero,
 		pipeline,
+		pipeline_long_polling,
+		rest_bad_accept,
+		rest_bad_content_type,
+		rest_expires,
 		rest_keepalive,
 		rest_keepalive_post,
+		rest_missing_get_callbacks,
+		rest_missing_put_callbacks,
 		rest_nodelete,
+		rest_options_default,
+		rest_param_all,
+		rest_patch,
+		rest_post_charset,
+		rest_postonly,
 		rest_resource_etags,
 		rest_resource_etags_if_none_match,
 		set_resp_body,
 		set_resp_header,
 		set_resp_overwrite,
+		slowloris,
+		slowloris2,
 		static_attribute_etag,
 		static_function_etag,
 		static_mimetypes_function,
@@ -109,102 +87,157 @@ groups() ->
 		static_test_file,
 		static_test_file_css,
 		stream_body_set_resp,
+		stream_body_set_resp_close,
+		stream_body_set_resp_chunked,
+		stream_body_set_resp_chunked10,
+		streamed_response,
 		te_chunked,
+		te_chunked_chopped,
 		te_chunked_delayed,
+		te_chunked_split_body,
+		te_chunked_split_crlf,
 		te_identity
 	],
 	[
-		{http, [], Tests},
-		{https, [], Tests},
-		{onrequest, [], [
+		{http, [parallel], Tests},
+		{https, [parallel], Tests},
+		{http_compress, [parallel], Tests},
+		{https_compress, [parallel], Tests},
+		{onrequest, [parallel], [
 			onrequest,
 			onrequest_reply
 		]},
-		{onresponse, [], [
+		{onresponse, [parallel], [
 			onresponse_crash,
 			onresponse_reply
+		]},
+		{onresponse_capitalize, [parallel], [
+			onresponse_capitalize
+		]},
+		{parse_host, [], [
+			parse_host
+		]},
+		{set_env, [], [
+			set_env_dispatch
 		]}
 	].
 
 init_per_suite(Config) ->
-	application:start(inets),
 	application:start(crypto),
-	application:start(ranch),
-	application:start(cowboy),
-	Config.
-
-end_per_suite(_Config) ->
-	application:stop(cowboy),
-	application:stop(ranch),
-	application:stop(crypto),
-	application:stop(inets),
-	ok.
-
-init_per_group(http, Config) ->
-	Port = 33080,
-	Transport = ranch_tcp,
-	Config1 = init_static_dir(Config),
-	{ok, _} = cowboy:start_http(http, 100, [{port, Port}], [
-		{dispatch, init_dispatch(Config1)},
-		{max_keepalive, 50},
-		{timeout, 500}
-	]),
-	{ok, Client} = cowboy_client:init([]),
-	[{scheme, <<"http">>}, {port, Port}, {opts, []},
-		{transport, Transport}, {client, Client}|Config1];
-init_per_group(https, Config) ->
-	Port = 33081,
-	Transport = ranch_ssl,
-	Opts = [
-		{certfile, ?config(data_dir, Config) ++ "cert.pem"},
-		{keyfile, ?config(data_dir, Config) ++ "key.pem"},
-		{password, "cowboy"}
-	],
-	Config1 = init_static_dir(Config),
+	application:start(asn1),
 	application:start(public_key),
 	application:start(ssl),
-	{ok, _} = cowboy:start_https(https, 100, Opts ++ [{port, Port}], [
-		{dispatch, init_dispatch(Config1)},
+	application:start(ranch),
+	application:start(gun),
+	application:start(cowlib),
+	application:start(cowboy),
+	Dir = ?config(priv_dir, Config) ++ "/static",
+	ct_helper:create_static_dir(Dir),
+	[{static_dir, Dir}|Config].
+
+end_per_suite(Config) ->
+	Dir = ?config(static_dir, Config),
+	ct_helper:delete_static_dir(Dir),
+	application:stop(cowboy),
+	application:stop(cowlib),
+	application:stop(gun),
+	application:stop(ranch),
+	application:stop(ssl),
+	application:stop(public_key),
+	application:stop(asn1),
+	application:stop(crypto),
+	ok.
+
+init_tcp_group(Ref, ProtoOpts, Config) ->
+	Transport = ranch_tcp,
+	{ok, _} = cowboy:start_http(Ref, 100, [{port, 0}], [
+		{env, [{dispatch, init_dispatch(Config)}]},
 		{max_keepalive, 50},
 		{timeout, 500}
-	]),
-	{ok, Client} = cowboy_client:init(Opts),
-	[{scheme, <<"https">>}, {port, Port}, {opts, Opts},
-		{transport, Transport}, {client, Client}|Config1];
+		|ProtoOpts]),
+	Port = ranch:get_port(Ref),
+	[{type, tcp}, {port, Port}, {opts, []}, {transport, Transport}|Config].
+
+init_ssl_group(Ref, ProtoOpts, Config) ->
+	Transport = ranch_ssl,
+	{_, Cert, Key} = ct_helper:make_certs(),
+	Opts = [{cert, Cert}, {key, Key}],
+	{ok, _} = cowboy:start_https(Ref, 100, Opts ++ [{port, 0}], [
+		{env, [{dispatch, init_dispatch(Config)}]},
+		{max_keepalive, 50},
+		{timeout, 500}
+		|ProtoOpts]),
+	Port = ranch:get_port(Ref),
+	[{type, ssl}, {port, Port}, {opts, Opts}, {transport, Transport}|Config].
+
+init_per_group(http, Config) ->
+	init_tcp_group(http, [], Config);
+init_per_group(https, Config) ->
+	init_ssl_group(https, [], Config);
+init_per_group(http_compress, Config) ->
+	init_tcp_group(http_compress, [{compress, true}], Config);
+init_per_group(https_compress, Config) ->
+	init_ssl_group(https_compress, [{compress, true}], Config);
+%% Most, if not all of these, should be in separate test suites.
 init_per_group(onrequest, Config) ->
-	Port = 33082,
 	Transport = ranch_tcp,
-	{ok, _} = cowboy:start_http(onrequest, 100, [{port, Port}], [
-		{dispatch, init_dispatch(Config)},
+	{ok, _} = cowboy:start_http(onrequest, 100, [{port, 0}], [
+		{env, [{dispatch, init_dispatch(Config)}]},
 		{max_keepalive, 50},
 		{onrequest, fun onrequest_hook/1},
 		{timeout, 500}
 	]),
-	{ok, Client} = cowboy_client:init([]),
-	[{scheme, <<"http">>}, {port, Port}, {opts, []},
-		{transport, Transport}, {client, Client}|Config];
+	Port = ranch:get_port(onrequest),
+	[{scheme, <<"http">>}, {type, tcp}, {port, Port}, {opts, []},
+		{transport, Transport}|Config];
 init_per_group(onresponse, Config) ->
-	Port = 33083,
 	Transport = ranch_tcp,
-	{ok, _} = cowboy:start_http(onresponse, 100, [{port, Port}], [
-		{dispatch, init_dispatch(Config)},
+	{ok, _} = cowboy:start_http(onresponse, 100, [{port, 0}], [
+		{env, [{dispatch, init_dispatch(Config)}]},
 		{max_keepalive, 50},
 		{onresponse, fun onresponse_hook/4},
 		{timeout, 500}
 	]),
-	{ok, Client} = cowboy_client:init([]),
-	[{scheme, <<"http">>}, {port, Port}, {opts, []},
-		{transport, Transport}, {client, Client}|Config].
+	Port = ranch:get_port(onresponse),
+	[{scheme, <<"http">>}, {type, tcp}, {port, Port}, {opts, []},
+		{transport, Transport}|Config];
+init_per_group(onresponse_capitalize, Config) ->
+	Transport = ranch_tcp,
+	{ok, _} = cowboy:start_http(onresponse_capitalize, 100, [{port, 0}], [
+		{env, [{dispatch, init_dispatch(Config)}]},
+		{max_keepalive, 50},
+		{onresponse, fun onresponse_capitalize_hook/4},
+		{timeout, 500}
+	]),
+	Port = ranch:get_port(onresponse_capitalize),
+	[{scheme, <<"http">>}, {type, tcp}, {port, Port}, {opts, []},
+		{transport, Transport}|Config];
+init_per_group(parse_host, Config) ->
+	Transport = ranch_tcp,
+	Dispatch = cowboy_router:compile([
+		{'_', [
+			{"/req_attr", http_req_attr, []}
+		]}
+	]),
+	{ok, _} = cowboy:start_http(http, 100, [{port, 0}], [
+		{env, [{dispatch, Dispatch}]},
+		{max_keepalive, 50},
+		{timeout, 500}
+	]),
+	Port = ranch:get_port(http),
+	[{scheme, <<"http">>}, {type, tcp}, {port, Port}, {opts, []},
+		{transport, Transport}|Config];
+init_per_group(set_env, Config) ->
+	Transport = ranch_tcp,
+	{ok, _} = cowboy:start_http(set_env, 100, [{port, 0}], [
+		{env, [{dispatch, []}]},
+		{max_keepalive, 50},
+		{timeout, 500}
+	]),
+	Port = ranch:get_port(set_env),
+	[{scheme, <<"http">>}, {type, tcp}, {port, Port}, {opts, []},
+		{transport, Transport}|Config].
 
-end_per_group(https, Config) ->
-	cowboy:stop_listener(https),
-	application:stop(ssl),
-	application:stop(public_key),
-	end_static_dir(Config),
-	ok;
-end_per_group(http, Config) ->
-	cowboy:stop_listener(http),
-	end_static_dir(Config);
 end_per_group(Name, _) ->
 	cowboy:stop_listener(Name),
 	ok.
@@ -212,113 +245,151 @@ end_per_group(Name, _) ->
 %% Dispatch configuration.
 
 init_dispatch(Config) ->
-	[
-		{[<<"localhost">>], [
-			{[<<"chunked_response">>], chunked_handler, []},
-			{[<<"init_shutdown">>], http_handler_init_shutdown, []},
-			{[<<"long_polling">>], http_handler_long_polling, []},
-			{[<<"headers">>, <<"dupe">>], http_handler,
+	cowboy_router:compile([
+		{"localhost", [
+			{"/chunked_response", http_chunked, []},
+			{"/streamed_response", http_streamed, []},
+			{"/init_shutdown", http_init_shutdown, []},
+			{"/long_polling", http_long_polling, []},
+			{"/headers/dupe", http_handler,
 				[{headers, [{<<"connection">>, <<"close">>}]}]},
-			{[<<"set_resp">>, <<"header">>], http_handler_set_resp,
+			{"/set_resp/header", http_set_resp,
 				[{headers, [{<<"vary">>, <<"Accept">>}]}]},
-			{[<<"set_resp">>, <<"overwrite">>], http_handler_set_resp,
+			{"/set_resp/overwrite", http_set_resp,
 				[{headers, [{<<"server">>, <<"DesireDrive/1.0">>}]}]},
-			{[<<"set_resp">>, <<"body">>], http_handler_set_resp,
+			{"/set_resp/body", http_set_resp,
 				[{body, <<"A flameless dance does not equal a cycle">>}]},
-			{[<<"stream_body">>, <<"set_resp">>], http_handler_stream_body,
+			{"/stream_body/set_resp", http_stream_body,
 				[{reply, set_resp}, {body, <<"stream_body_set_resp">>}]},
-			{[<<"static">>, '...'], cowboy_static,
-				[{directory, ?config(static_dir, Config)},
-				 {mimetypes, [{<<".css">>, [<<"text/css">>]}]}]},
-			{[<<"static_mimetypes_function">>, '...'], cowboy_static,
-				[{directory, ?config(static_dir, Config)},
-				 {mimetypes, {fun(Path, data) when is_binary(Path) ->
-					[<<"text/html">>] end, data}}]},
-			{[<<"handler_errors">>], http_handler_errors, []},
-			{[<<"static_attribute_etag">>, '...'], cowboy_static,
-				[{directory, ?config(static_dir, Config)},
-				 {etag, {attributes, [filepath, filesize, inode, mtime]}}]},
-			{[<<"static_function_etag">>, '...'], cowboy_static,
-				[{directory, ?config(static_dir, Config)},
-				 {etag, {fun static_function_etag/2, etag_data}}]},
-			{[<<"static_specify_file">>, '...'],  cowboy_static,
-				[{directory, ?config(static_dir, Config)},
-				 {mimetypes, [{<<".css">>, [<<"text/css">>]}]},
-				 {file, <<"test_file.css">>}]},
-			{[<<"multipart">>], http_handler_multipart, []},
-			{[<<"echo">>, <<"body">>], http_handler_echo_body, []},
-			{[<<"simple">>], rest_simple_resource, []},
-			{[<<"forbidden_post">>], rest_forbidden_resource, [true]},
-			{[<<"simple_post">>], rest_forbidden_resource, [false]},
-			{[<<"nodelete">>], rest_nodelete_resource, []},
-			{[<<"resetags">>], rest_resource_etags, []},
-			{[<<"loop_timeout">>], http_handler_loop_timeout, []},
-			{[], http_handler, []}
+			{"/stream_body/set_resp_close",
+				http_stream_body, [
+					{reply, set_resp_close},
+					{body, <<"stream_body_set_resp_close">>}]},
+			{"/stream_body/set_resp_chunked",
+				http_stream_body, [
+					{reply, set_resp_chunked},
+					{body, [<<"stream_body">>, <<"_set_resp_chunked">>]}]},
+			{"/static/[...]", cowboy_static,
+				{dir, ?config(static_dir, Config)}},
+			{"/static_mimetypes_function/[...]", cowboy_static,
+				{dir, ?config(static_dir, Config),
+					[{mimetypes, ?MODULE, mimetypes_text_html}]}},
+			{"/handler_errors", http_errors, []},
+			{"/static_attribute_etag/[...]", cowboy_static,
+				{dir, ?config(static_dir, Config)}},
+			{"/static_function_etag/[...]", cowboy_static,
+				{dir, ?config(static_dir, Config),
+					[{etag, ?MODULE, etag_gen}]}},
+			{"/static_specify_file/[...]", cowboy_static,
+				{file, ?config(static_dir, Config) ++ "/style.css"}},
+			{"/multipart", http_multipart, []},
+			{"/multipart/large", http_multipart_stream, []},
+			{"/echo/body", http_echo_body, []},
+			{"/echo/body_qs", http_body_qs, []},
+			{"/param_all", rest_param_all, []},
+			{"/bad_accept", rest_simple_resource, []},
+			{"/bad_content_type", rest_patch_resource, []},
+			{"/simple", rest_simple_resource, []},
+			{"/forbidden_post", rest_forbidden_resource, [true]},
+			{"/simple_post", rest_forbidden_resource, [false]},
+			{"/missing_get_callbacks", rest_missing_callbacks, []},
+			{"/missing_put_callbacks", rest_missing_callbacks, []},
+			{"/nodelete", rest_nodelete_resource, []},
+			{"/post_charset", rest_post_charset_resource, []},
+			{"/postonly", rest_postonly_resource, []},
+			{"/patch", rest_patch_resource, []},
+			{"/resetags", rest_resource_etags, []},
+			{"/rest_expires", rest_expires, []},
+			{"/rest_empty_resource", rest_empty_resource, []},
+			{"/loop_recv", http_loop_recv, []},
+			{"/loop_stream_recv", http_loop_stream_recv, []},
+			{"/loop_timeout", http_loop_timeout, []},
+			{"/", http_handler, []}
 		]}
-	].
+	]).
 
-init_static_dir(Config) ->
-	Dir = filename:join(?config(priv_dir, Config), "static"),
-	Level1 = fun(Name) -> filename:join(Dir, Name) end,
-	ok = file:make_dir(Dir),
-	ok = file:write_file(Level1("test_file"), "test_file\n"),
-	ok = file:write_file(Level1("test_file.css"), "test_file.css\n"),
-	ok = file:write_file(Level1("test_noread"), "test_noread\n"),
-	ok = file:change_mode(Level1("test_noread"), 8#0333),
-	ok = file:write_file(Level1("test.html"), "test.html\n"),
-	ok = file:make_dir(Level1("test_dir")),
-	[{static_dir, Dir}|Config].
+etag_gen(_, _, _) ->
+	{strong, <<"etag">>}.
 
-end_static_dir(Config) ->
-	Dir = ?config(static_dir, Config),
-	Level1 = fun(Name) -> filename:join(Dir, Name) end,
-	ok = file:delete(Level1("test_file")),
-	ok = file:delete(Level1("test_file.css")),
-	ok = file:delete(Level1("test_noread")),
-	ok = file:delete(Level1("test.html")),
-	ok = file:del_dir(Level1("test_dir")),
-	ok = file:del_dir(Dir),
-	Config.
+mimetypes_text_html(_) ->
+	<<"text/html">>.
+
+%% Support functions for testing using Gun.
+
+gun_open(Config) ->
+	gun_open(Config, []).
+
+gun_open(Config, Opts) ->
+	{_, Port} = lists:keyfind(port, 1, Config),
+	{_, Type} = lists:keyfind(type, 1, Config),
+	{ok, ConnPid} = gun:open("localhost", Port, [{retry, 0}, {type, Type}|Opts]),
+	ConnPid.
+
+gun_monitor_open(Config) ->
+	gun_monitor_open(Config, []).
+
+gun_monitor_open(Config, Opts) ->
+	ConnPid = gun_open(Config, Opts),
+	{ConnPid, monitor(process, ConnPid)}.
+
+gun_is_gone(ConnPid) ->
+	gun_is_gone(ConnPid, monitor(process, ConnPid)).
+
+gun_is_gone(ConnPid, MRef) ->
+	receive {'DOWN', MRef, process, ConnPid, gone} -> ok
+	after 500 -> error(timeout) end.
+
+%% Support functions for testing using a raw socket.
+
+raw_open(Config) ->
+	{_, Port} = lists:keyfind(port, 1, Config),
+	{_, Type} = lists:keyfind(type, 1, Config),
+	Transport = case Type of
+		tcp -> gen_tcp;
+		ssl -> ssl
+	end,
+	{_, Opts} = lists:keyfind(opts, 1, Config),
+	{ok, Socket} = Transport:connect("localhost", Port,
+		[binary, {active, false}, {packet, raw},
+			{reuseaddr, true}, {nodelay, true}|Opts]),
+	{raw_client, Socket, Transport}.
+
+raw_send({raw_client, Socket, Transport}, Data) ->
+	Transport:send(Socket, Data).
+
+raw_recv_head({raw_client, Socket, Transport}) ->
+	{ok, Data} = Transport:recv(Socket, 0, 5000),
+	raw_recv_head(Socket, Transport, Data).
+
+raw_recv_head(Socket, Transport, Buffer) ->
+	case binary:match(Buffer, <<"\r\n\r\n">>) of
+		nomatch ->
+			{ok, Data} = Transport:recv(Socket, 0, 5000),
+			raw_recv_head(Socket, Transport, << Buffer/binary, Data/binary >>);
+		{_, _} ->
+			Buffer
+	end.
+
+raw_expect_recv({raw_client, Socket, Transport}, Expect) ->
+	{ok, Expect} = Transport:recv(Socket, iolist_size(Expect), 5000),
+	ok.
 
 %% Convenience functions.
 
 quick_raw(Data, Config) ->
-	Client = ?config(client, Config),
-	Transport = ?config(transport, Config),
-	{ok, Client2} = cowboy_client:connect(
-		Transport, "localhost", ?config(port, Config), Client),
-	{ok, Client3} = cowboy_client:raw_request(Data, Client2),
-	case cowboy_client:response(Client3) of
-		{ok, Status, _, _} -> Status;
-		{error, _} -> closed
+	Client = raw_open(Config),
+	ok = raw_send(Client, Data),
+	case catch raw_recv_head(Client) of
+		{'EXIT', _} -> closed;
+		Resp -> element(2, cow_http:parse_status_line(Resp))
 	end.
 
-build_url(Path, Config) ->
-	{scheme, Scheme} = lists:keyfind(scheme, 1, Config),
-	{port, Port} = lists:keyfind(port, 1, Config),
-	PortBin = list_to_binary(integer_to_list(Port)),
-	PathBin = list_to_binary(Path),
-	<< Scheme/binary, "://localhost:", PortBin/binary, PathBin/binary >>.
-
-quick_get(URL, Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url(URL, Config), Client),
-	{ok, Status, _, _} = cowboy_client:response(Client2),
+quick_get(Path, Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, Path),
+	{response, _, Status, _} = gun:await(ConnPid, Ref),
+	gun:close(ConnPid),
 	Status.
-
-body_to_chunks(_, <<>>, Acc) ->
-	lists:reverse([<<"0\r\n\r\n">>|Acc]);
-body_to_chunks(ChunkSize, Body, Acc) ->
-	BodySize = byte_size(Body),
-	ChunkSize2 = case BodySize < ChunkSize of
-		true -> BodySize;
-		false -> ChunkSize
-	end,
-	<< Chunk:ChunkSize2/binary, Rest/binary >> = Body,
-	ChunkSizeBin = list_to_binary(integer_to_list(ChunkSize2, 16)),
-	body_to_chunks(ChunkSize, Rest,
-		[<< ChunkSizeBin/binary, "\r\n", Chunk/binary, "\r\n" >>|Acc]).
 
 %% Tests.
 
@@ -345,15 +416,20 @@ The document has moved
 <A HREF=\"http://www.google.co.il/\">here</A>.
 </BODY></HTML>",
 	Tests = [
+		{102, <<"GET /long_polling HTTP/1.1\r\nHost: localhost\r\n"
+			"Content-Length: 5000\r\n\r\n", 0:5000/unit:8 >>},
 		{200, ["GET / HTTP/1.0\r\nHost: localhost\r\n"
 			"Set-Cookie: ", HugeCookie, "\r\n\r\n"]},
 		{200, "\r\n\r\n\r\n\r\n\r\nGET / HTTP/1.1\r\nHost: localhost\r\n\r\n"},
 		{200, "GET http://proxy/ HTTP/1.1\r\nHost: localhost\r\n\r\n"},
+		{200, <<"POST /loop_recv HTTP/1.1\r\nHost: localhost\r\n"
+			"Content-Length: 100000\r\n\r\n", 0:100000/unit:8 >>},
 		{400, "\n"},
 		{400, "Garbage\r\n\r\n"},
 		{400, "\r\n\r\n\r\n\r\n\r\n\r\n"},
 		{400, "GET / HTTP/1.1\r\nHost: ninenines.eu\r\n\r\n"},
 		{400, "GET http://proxy/ HTTP/1.1\r\n\r\n"},
+		{400, "GET / HTTP/1.1\r\nHost: localhost:bad_port\r\n\r\n"},
 		{505, ResponsePacket},
 		{408, "GET / HTTP/1.1\r\n"},
 		{408, "GET / HTTP/1.1\r\nHost: localhost"},
@@ -361,6 +437,8 @@ The document has moved
 		{408, "GET / HTTP/1.1\r\nHost: localhost\r\n\r"},
 		{414, Huge},
 		{400, "GET / HTTP/1.1\r\n" ++ Huge},
+		{500, <<"GET /long_polling HTTP/1.1\r\nHost: localhost\r\n"
+			"Content-Length: 100000\r\n\r\n", 0:100000/unit:8 >>},
 		{505, "GET / HTTP/1.2\r\nHost: localhost\r\n\r\n"},
 		{closed, ""},
 		{closed, "\r\n"},
@@ -370,7 +448,8 @@ The document has moved
 	_ = [{Status, Packet} = begin
 		Ret = quick_raw(Packet, Config),
 		{Ret, Packet}
-	end || {Status, Packet} <- Tests].
+	end || {Status, Packet} <- Tests],
+	ok.
 
 check_status(Config) ->
 	Tests = [
@@ -381,12 +460,12 @@ check_status(Config) ->
 		{400, "/static/%2f"},
 		{400, "/static/%2e"},
 		{400, "/static/%2e%2e"},
-		{403, "/static/test_dir"},
-		{403, "/static/test_dir/"},
-		{403, "/static/test_noread"},
+		{403, "/static/directory"},
+		{403, "/static/directory/"},
+		{403, "/static/unreadable"},
 		{404, "/not/found"},
 		{404, "/static/not_found"},
-		{500, "/handler_errors?case=handler_before_reply"},
+		{500, "/handler_errors?case=handle_before_reply"},
 		{500, "/handler_errors?case=init_before_reply"},
 		{666, "/init_shutdown"}
 	],
@@ -395,94 +474,96 @@ check_status(Config) ->
 		{Ret, URL}
 	end || {Status, URL} <- Tests].
 
-%% @todo Convert to cowboy_client.
 chunked_response(Config) ->
-	{ok, {{"HTTP/1.1", 200, "OK"}, _, "chunked_handler\r\nworks fine!"}}
-		= httpc:request(binary_to_list(build_url("/chunked_response", Config))).
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/chunked_response"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+	true = lists:keymember(<<"transfer-encoding">>, 1, Headers),
+	{ok, <<"chunked_handler\r\nworks fine!">>} = gun:await_body(ConnPid, Ref),
+	ok.
 
 %% Check if sending requests whose size is around the MTU breaks something.
 echo_body(Config) ->
-	Client = ?config(client, Config),
-	{ok, [{mtu, MTU}]} = inet:ifget("lo", [mtu]),
-	[begin
+	MTU = ct_helper:get_loopback_mtu(),
+	_ = [begin
 		Body = list_to_binary(lists:duplicate(Size, $a)),
-		{ok, Client2} = cowboy_client:request(<<"POST">>,
-			build_url("/echo/body", Config),
-			[{<<"connection">>, <<"close">>}],
-			Body, Client),
-		{ok, 200, _, Client3} = cowboy_client:response(Client2),
-		{ok, Body, _} = cowboy_client:response_body(Client3)
-	end || Size <- lists:seq(MTU - 500, MTU)].
+		ConnPid = gun_open(Config),
+		Ref = gun:post(ConnPid, "/echo/body", [], Body),
+		{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+		{ok, Body} = gun:await_body(ConnPid, Ref)
+	end || Size <- lists:seq(MTU - 500, MTU)],
+	ok.
+
+%% Check if sending request whose size is bigger than 1000000 bytes causes 413
+echo_body_max_length(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/echo/body", [], << 0:8000008 >>),
+	{response, nofin, 413, _} = gun:await(ConnPid, Ref),
+	ok.
+
+% check if body_qs echo's back results
+echo_body_qs(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/echo/body_qs", [], <<"echo=67890">>),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, <<"67890">>} = gun:await_body(ConnPid, Ref),
+	ok.
+
+echo_body_qs_max_length(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/echo/body_qs", [], << "echo=", 0:15996/unit:8 >>),
+	{response, nofin, 413, _} = gun:await(ConnPid, Ref),
+	ok.
 
 error_chain_handle_after_reply(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/", Config), Client),
-	{ok, Client3} = cowboy_client:request(<<"GET">>,
-		build_url("/handler_errors?case=handle_after_reply", Config), Client2),
-	{ok, 200, _, Client4} = cowboy_client:response(Client3),
-	{ok, 200, _, Client5} = cowboy_client:response(Client4),
-	{error, closed} = cowboy_client:response(Client5).
+	{ConnPid, MRef} = gun_monitor_open(Config),
+	Ref1 = gun:get(ConnPid, "/"),
+	Ref2 = gun:get(ConnPid, "/handler_errors?case=handle_after_reply"),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref1, MRef),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref2, MRef),
+	gun_is_gone(ConnPid, MRef).
 
 error_chain_handle_before_reply(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/", Config), Client),
-	{ok, Client3} = cowboy_client:request(<<"GET">>,
-		build_url("/handler_errors?case=handle_before_reply", Config), Client2),
-	{ok, 200, _, Client4} = cowboy_client:response(Client3),
-	{ok, 500, _, Client5} = cowboy_client:response(Client4),
-	{error, closed} = cowboy_client:response(Client5).
+	{ConnPid, MRef} = gun_monitor_open(Config),
+	Ref1 = gun:get(ConnPid, "/"),
+	Ref2 = gun:get(ConnPid, "/handler_errors?case=handle_before_reply"),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref1, MRef),
+	{response, fin, 500, _} = gun:await(ConnPid, Ref2, MRef),
+	gun_is_gone(ConnPid, MRef).
 
 error_handle_after_reply(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/handler_errors?case=handle_after_reply", Config), Client),
-	{ok, 200, _, Client3} = cowboy_client:response(Client2),
-	{error, closed} = cowboy_client:response(Client3).
+	{ConnPid, MRef} = gun_monitor_open(Config),
+	Ref = gun:get(ConnPid, "/handler_errors?case=handle_after_reply"),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref, MRef),
+	gun_is_gone(ConnPid, MRef).
 
 error_init_after_reply(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/handler_errors?case=init_after_reply", Config), Client),
-	{ok, 200, _, Client3} = cowboy_client:response(Client2),
-	{error, closed} = cowboy_client:response(Client3).
+	{ConnPid, MRef} = gun_monitor_open(Config),
+	Ref = gun:get(ConnPid, "/handler_errors?case=init_after_reply"),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref, MRef),
+	gun_is_gone(ConnPid, MRef).
 
 error_init_reply_handle_error(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/handler_errors?case=init_reply_handle_error", Config), Client),
-	{ok, 200, _, Client3} = cowboy_client:response(Client2),
-	{error, closed} = cowboy_client:response(Client3).
+	{ConnPid, MRef} = gun_monitor_open(Config),
+	Ref = gun:get(ConnPid, "/handler_errors?case=init_reply_handle_error"),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref, MRef),
+	gun_is_gone(ConnPid, MRef).
 
 headers_dupe(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/headers/dupe", Config), Client),
-	{ok, 200, Headers, Client3} = cowboy_client:response(Client2),
-	{<<"connection">>, <<"close">>}
-		= lists:keyfind(<<"connection">>, 1, Headers),
-	Connections = [H || H = {Name, _} <- Headers, Name =:= <<"connection">>],
-	1 = length(Connections),
-	{error, closed} = cowboy_client:response(Client3).
+	{ConnPid, MRef} = gun_monitor_open(Config),
+	Ref = gun:get(ConnPid, "/headers/dupe"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref, MRef),
+	%% Ensure that only one connection header was received.
+	[<<"close">>] = [V || {Name, V} <- Headers, Name =:= <<"connection">>],
+	gun_is_gone(ConnPid, MRef).
 
 http10_chunkless(Config) ->
-	Client = ?config(client, Config),
-	Transport = ?config(transport, Config),
-	{ok, Client2} = cowboy_client:connect(
-		Transport, "localhost", ?config(port, Config), Client),
-	Data = "GET /chunked_response HTTP/1.0\r\nHost: localhost\r\n\r\n",
-	{ok, Client3} = cowboy_client:raw_request(Data, Client2),
-	{ok, 200, Headers, Client4} = cowboy_client:response(Client3),
+	{ConnPid, MRef} = gun_monitor_open(Config, [{http, [{version, 'HTTP/1.0'}]}]),
+	Ref = gun:get(ConnPid, "/chunked_response"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref, MRef),
 	false = lists:keyfind(<<"transfer-encoding">>, 1, Headers),
-	%% Hack: we just try to get 28 bytes and compare.
-	{ok, Transport, Socket} = cowboy_client:transport(Client4),
-	Buffer = element(7, Client4),
-	Buffer2 = case Transport:recv(Socket, 28 - byte_size(Buffer), 1000) of
-		{ok, Recv} -> << Buffer/binary, Recv/binary >>;
-		_ -> Buffer
-	end,
-	<<"chunked_handler\r\nworks fine!">> = Buffer2.
+	{ok, <<"chunked_handler\r\nworks fine!">>} = gun:await_body(ConnPid, Ref, MRef),
+	gun_is_gone(ConnPid, MRef).
 
 http10_hostless(Config) ->
 	Port10 = ?config(port, Config) + 10,
@@ -490,8 +571,8 @@ http10_hostless(Config) ->
 	ranch:start_listener(Name, 5,
 		?config(transport, Config), ?config(opts, Config) ++ [{port, Port10}],
 		cowboy_protocol, [
-			{dispatch, [{'_', [
-				{[<<"http1.0">>, <<"hostless">>], http_handler, []}]}]},
+			{env, [{dispatch, cowboy_router:compile([
+				{'_', [{"/http1.0/hostless", http_handler, []}]}])}]},
 			{max_keepalive, 50},
 			{timeout, 500}]
 	),
@@ -500,61 +581,80 @@ http10_hostless(Config) ->
 	cowboy:stop_listener(http10).
 
 keepalive_max(Config) ->
-	Client = ?config(client, Config),
-	URL = build_url("/", Config),
-	ok = keepalive_max_loop(Client, URL, 50).
-
-keepalive_max_loop(_, _, 0) ->
-	ok;
-keepalive_max_loop(Client, URL, N) ->
-	Headers = [{<<"connection">>, <<"keep-alive">>}],
-	{ok, Client2} = cowboy_client:request(<<"GET">>, URL, Headers, Client),
-	{ok, 200, RespHeaders, Client3} = cowboy_client:response(Client2),
-	Expected = case N of
-		1 -> <<"close">>;
-		N -> <<"keep-alive">>
-	end,
-	{<<"connection">>, Expected}
-		= lists:keyfind(<<"connection">>, 1, RespHeaders),
-	keepalive_max_loop(Client3, URL, N - 1).
+	{ConnPid, MRef} = gun_monitor_open(Config),
+	Refs = [gun:get(ConnPid, "/", [{<<"connection">>, <<"keep-alive">>}])
+		|| _ <- lists:seq(1, 49)],
+	CloseRef = gun:get(ConnPid, "/", [{<<"connection">>, <<"keep-alive">>}]),
+	_ = [begin
+		{response, nofin, 200, Headers} = gun:await(ConnPid, Ref, MRef),
+		{_, <<"keep-alive">>} = lists:keyfind(<<"connection">>, 1, Headers)
+	end || Ref <- Refs],
+	{response, nofin, 200, Headers} = gun:await(ConnPid, CloseRef, MRef),
+	{_, <<"close">>} = lists:keyfind(<<"connection">>, 1, Headers),
+	gun_is_gone(ConnPid, MRef).
 
 keepalive_nl(Config) ->
-	Client = ?config(client, Config),
-	URL = build_url("/", Config),
-	ok = keepalive_nl_loop(Client, URL, 10).
+	ConnPid = gun_open(Config),
+	Refs = [begin
+		Ref = gun:get(ConnPid, "/", [{<<"connection">>, <<"keep-alive">>}]),
+		gun:dbg_send_raw(ConnPid, <<"\r\n">>),
+		Ref
+	end || _ <- lists:seq(1, 10)],
+	_ = [begin
+		{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+		{_, <<"keep-alive">>} = lists:keyfind(<<"connection">>, 1, Headers)
+	end || Ref <- Refs],
+	ok.
 
-keepalive_nl_loop(_, _, 0) ->
-	ok;
-keepalive_nl_loop(Client, URL, N) ->
-	Headers = [{<<"connection">>, <<"keep-alive">>}],
-	{ok, Client2} = cowboy_client:request(<<"GET">>, URL, Headers, Client),
-	{ok, 200, RespHeaders, Client3} = cowboy_client:response(Client2),
-	{<<"connection">>, <<"keep-alive">>}
-		= lists:keyfind(<<"connection">>, 1, RespHeaders),
-	{ok, Transport, Socket} = cowboy_client:transport(Client2),
-	ok = Transport:send(Socket, <<"\r\n">>), %% empty line
-	keepalive_nl_loop(Client3, URL, N - 1).
+keepalive_stream_loop(Config) ->
+	ConnPid = gun_open(Config),
+	Refs = [begin
+		Ref = gun:post(ConnPid, "/loop_stream_recv",
+			[{<<"transfer-encoding">>, <<"chunked">>}]),
+		_ = [gun:data(ConnPid, Ref, nofin, << ID:32 >>)
+			|| ID <- lists:seq(1, 250)],
+		gun:data(ConnPid, Ref, fin, <<>>),
+		Ref
+	end || _ <- lists:seq(1, 10)],
+	_ = [begin
+		{response, fin, 200, _} = gun:await(ConnPid, Ref)
+	end || Ref <- Refs],
+	ok.
 
 multipart(Config) ->
-	Client = ?config(client, Config),
+	ConnPid = gun_open(Config),
 	Body = <<
 		"This is a preamble."
 		"\r\n--OHai\r\nX-Name:answer\r\n\r\n42"
 		"\r\n--OHai\r\nServer:Cowboy\r\n\r\nIt rocks!\r\n"
-		"\r\n--OHai--"
-		"This is an epiloque."
+		"\r\n--OHai--\r\n"
+		"This is an epilogue."
 	>>,
-	{ok, Client2} = cowboy_client:request(<<"POST">>,
-		build_url("/multipart", Config),
+	Ref = gun:post(ConnPid, "/multipart",
 		[{<<"content-type">>, <<"multipart/x-makes-no-sense; boundary=OHai">>}],
-		Body, Client),
-	{ok, 200, _, Client3} = cowboy_client:response(Client2),
-	{ok, RespBody, _} = cowboy_client:response_body(Client3),
+		Body),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, RespBody} = gun:await_body(ConnPid, Ref),
 	Parts = binary_to_term(RespBody),
 	Parts = [
 		{[{<<"x-name">>, <<"answer">>}], <<"42">>},
 		{[{<<"server">>, <<"Cowboy">>}], <<"It rocks!\r\n">>}
-	].
+	],
+	ok.
+
+multipart_large(Config) ->
+	ConnPid = gun_open(Config),
+	Boundary = "----------",
+	Big = << 0:9000000/unit:8 >>,
+	Bigger = << 0:9999999/unit:8 >>,
+	Body = ["--", Boundary, "\r\ncontent-length: 9000000\r\n\r\n", Big, "\r\n",
+		"--", Boundary, "\r\ncontent-length: 9999999\r\n\r\n", Bigger, "\r\n",
+		"--", Boundary, "--\r\n"],
+	Ref = gun:post(ConnPid, "/multipart/large",
+		[{<<"content-type">>, ["multipart/x-large; boundary=", Boundary]}],
+		Body),
+	{response, fin, 200, _} = gun:await(ConnPid, Ref),
+	ok.
 
 nc_reqs(Config, Input) ->
 	Cat = os:find_executable("cat"),
@@ -580,20 +680,20 @@ nc_zero(Config) ->
 	nc_reqs(Config, "/dev/zero").
 
 onrequest(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/", Config), Client),
-	{ok, 200, Headers, Client3} = cowboy_client:response(Client2),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
 	{<<"server">>, <<"Serenity">>} = lists:keyfind(<<"server">>, 1, Headers),
-	{ok, <<"http_handler">>, _} = cowboy_client:response_body(Client3).
+	{ok, <<"http_handler">>} = gun:await_body(ConnPid, Ref),
+	ok.
 
 onrequest_reply(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/?reply=1", Config), Client),
-	{ok, 200, Headers, Client3} = cowboy_client:response(Client2),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/?reply=1"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
 	{<<"server">>, <<"Cowboy">>} = lists:keyfind(<<"server">>, 1, Headers),
-	{ok, <<"replied!">>, _} = cowboy_client:response_body(Client3).
+	{ok, <<"replied!">>} = gun:await_body(ConnPid, Ref),
+	ok.
 
 %% Hook for the above onrequest tests.
 onrequest_hook(Req) ->
@@ -606,21 +706,32 @@ onrequest_hook(Req) ->
 			Req3
 	end.
 
+onresponse_capitalize(Config) ->
+	Client = raw_open(Config),
+	ok = raw_send(Client, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+	Data = raw_recv_head(Client),
+	false = nomatch =:= binary:match(Data, <<"Content-Length">>),
+	ok.
+
+%% Hook for the above onresponse_capitalize test.
+onresponse_capitalize_hook(Status, Headers, Body, Req) ->
+	Headers2 = [{cowboy_bstr:capitalize_token(N), V}
+		|| {N, V} <- Headers],
+	{ok, Req2} = cowboy_req:reply(Status, Headers2, Body, Req),
+	Req2.
+
 onresponse_crash(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/handler_errors?case=init_before_reply", Config), Client),
-	{ok, 777, Headers, _} = cowboy_client:response(Client2),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/handler_errors?case=init_before_reply"),
+	{response, fin, 777, Headers} = gun:await(ConnPid, Ref),
 	{<<"x-hook">>, <<"onresponse">>} = lists:keyfind(<<"x-hook">>, 1, Headers).
 
 onresponse_reply(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/", Config), Client),
-	{ok, 777, Headers, Client3} = cowboy_client:response(Client2),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/"),
+	{response, nofin, 777, Headers} = gun:await(ConnPid, Ref),
 	{<<"x-hook">>, <<"onresponse">>} = lists:keyfind(<<"x-hook">>, 1, Headers),
-	%% Make sure we don't get the body initially sent.
-	{error, closed} = cowboy_client:response_body(Client3).
+	ok.
 
 %% Hook for the above onresponse tests.
 onresponse_hook(_, Headers, _, Req) ->
@@ -628,83 +739,182 @@ onresponse_hook(_, Headers, _, Req) ->
 		<<"777 Lucky">>, [{<<"x-hook">>, <<"onresponse">>}|Headers], Req),
 	Req2.
 
+parse_host(Config) ->
+	ConnPid = gun_open(Config),
+	Tests = [
+		{<<"example.org:8080">>, <<"example.org\n8080">>},
+		{<<"example.org">>, <<"example.org\n80">>},
+		{<<"192.0.2.1:8080">>, <<"192.0.2.1\n8080">>},
+		{<<"192.0.2.1">>, <<"192.0.2.1\n80">>},
+		{<<"[2001:db8::1]:8080">>, <<"[2001:db8::1]\n8080">>},
+		{<<"[2001:db8::1]">>, <<"[2001:db8::1]\n80">>},
+		{<<"[::ffff:192.0.2.1]:8080">>, <<"[::ffff:192.0.2.1]\n8080">>},
+		{<<"[::ffff:192.0.2.1]">>, <<"[::ffff:192.0.2.1]\n80">>}
+	],
+	[begin
+		Ref = gun:get(ConnPid, "/req_attr?attr=host_and_port",
+			[{<<"host">>, Host}]),
+		{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+		{ok, Body} = gun:await_body(ConnPid, Ref)
+	end || {Host, Body} <- Tests],
+	ok.
+
 pipeline(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/", Config), Client),
-	{ok, Client3} = cowboy_client:request(<<"GET">>,
-		build_url("/", Config), Client2),
-	{ok, Client4} = cowboy_client:request(<<"GET">>,
-		build_url("/", Config), Client3),
-	{ok, Client5} = cowboy_client:request(<<"GET">>,
-		build_url("/", Config), Client4),
-	{ok, Client6} = cowboy_client:request(<<"GET">>,
-		build_url("/", Config), [{<<"connection">>, <<"close">>}], Client5),
-	{ok, 200, _, Client7} = cowboy_client:response(Client6),
-	{ok, 200, _, Client8} = cowboy_client:response(Client7),
-	{ok, 200, _, Client9} = cowboy_client:response(Client8),
-	{ok, 200, _, Client10} = cowboy_client:response(Client9),
-	{ok, 200, _, Client11} = cowboy_client:response(Client10),
-	{error, closed} = cowboy_client:response(Client11).
+	ConnPid = gun_open(Config),
+	Refs = [gun:get(ConnPid, "/") || _ <- lists:seq(1, 5)],
+	_ = [{response, nofin, 200, _} = gun:await(ConnPid, Ref) || Ref <- Refs],
+	ok.
+
+pipeline_long_polling(Config) ->
+	ConnPid = gun_open(Config),
+	Refs = [gun:get(ConnPid, "/long_polling") || _ <- lists:seq(1, 2)],
+	_ = [{response, fin, 102, _} = gun:await(ConnPid, Ref) || Ref <- Refs],
+	ok.
+
+rest_param_all(Config) ->
+	ConnPid = gun_open(Config),
+	%% Accept without param.
+	Ref1 = gun:get(ConnPid, "/param_all",
+		[{<<"accept">>, <<"text/plain">>}]),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref1),
+	{ok, <<"[]">>} = gun:await_body(ConnPid, Ref1),
+	%% Accept with param.
+	Ref2 = gun:get(ConnPid, "/param_all",
+		[{<<"accept">>, <<"text/plain;level=1">>}]),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref2),
+	{ok, <<"level=1">>} = gun:await_body(ConnPid, Ref2),
+	%% Accept with param and quality.
+	Ref3 = gun:get(ConnPid, "/param_all",
+		[{<<"accept">>, <<"text/plain;level=1;q=0.8, text/plain;level=2;q=0.5">>}]),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref3),
+	{ok, <<"level=1">>} = gun:await_body(ConnPid, Ref3),
+	Ref4 = gun:get(ConnPid, "/param_all",
+		[{<<"accept">>, <<"text/plain;level=1;q=0.5, text/plain;level=2;q=0.8">>}]),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref4),
+	{ok, <<"level=2">>} = gun:await_body(ConnPid, Ref4),
+	%% Without Accept.
+	Ref5 = gun:get(ConnPid, "/param_all"),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref5),
+	{ok, <<"'*'">>} = gun:await_body(ConnPid, Ref5),
+	%% Content-Type without param.
+	Ref6 = gun:put(ConnPid, "/param_all",
+		[{<<"content-type">>, <<"text/plain">>}]),
+	{response, fin, 204, _} = gun:await(ConnPid, Ref6),
+	%% Content-Type with param.
+	Ref7 = gun:put(ConnPid, "/param_all",
+		[{<<"content-type">>, <<"text/plain; charset=utf-8">>}]),
+	{response, fin, 204, _} = gun:await(ConnPid, Ref7),
+	ok.
+
+rest_bad_accept(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/bad_accept",
+		[{<<"accept">>, <<"1">>}]),
+	{response, fin, 400, _} = gun:await(ConnPid, Ref),
+	ok.
+
+rest_bad_content_type(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:patch(ConnPid, "/bad_content_type",
+		[{<<"content-type">>, <<"text/plain, text/html">>}], <<"Whatever">>),
+	{response, fin, 415, _} = gun:await(ConnPid, Ref),
+	ok.
+
+rest_expires(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/rest_expires"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, Expires} = lists:keyfind(<<"expires">>, 1, Headers),
+	{_, LastModified} = lists:keyfind(<<"last-modified">>, 1, Headers),
+	Expires = LastModified = <<"Fri, 21 Sep 2012 22:36:14 GMT">>,
+	ok.
 
 rest_keepalive(Config) ->
-	Client = ?config(client, Config),
-	URL = build_url("/simple", Config),
-	ok = rest_keepalive_loop(Client, URL, 10).
-
-rest_keepalive_loop(_, _, 0) ->
-	ok;
-rest_keepalive_loop(Client, URL, N) ->
-	Headers = [{<<"connection">>, <<"keep-alive">>}],
-	{ok, Client2} = cowboy_client:request(<<"GET">>, URL, Headers, Client),
-	{ok, 200, RespHeaders, Client3} = cowboy_client:response(Client2),
-	{<<"connection">>, <<"keep-alive">>}
-		= lists:keyfind(<<"connection">>, 1, RespHeaders),
-	rest_keepalive_loop(Client3, URL, N - 1).
+	ConnPid = gun_open(Config),
+	Refs = [gun:get(ConnPid, "/simple") || _ <- lists:seq(1, 10)],
+	_ = [begin
+		{response, nofin, 200, Headers} =  gun:await(ConnPid, Ref),
+		{_, <<"keep-alive">>} = lists:keyfind(<<"connection">>, 1, Headers)
+	end || Ref <- Refs],
+	ok.
 
 rest_keepalive_post(Config) ->
-	Client = ?config(client, Config),
-	ok = rest_keepalive_post_loop(Config, Client, forbidden_post, 10).
+	ConnPid = gun_open(Config),
+	Refs = [{
+		gun:post(ConnPid, "/forbidden_post",
+			[{<<"content-type">>, <<"text/plain">>}]),
+		gun:post(ConnPid, "/simple_post",
+			[{<<"content-type">>, <<"text/plain">>}])
+	} || _ <- lists:seq(1, 5)],
+	_ = [begin
+		{response, fin, 403, Headers1} = gun:await(ConnPid, Ref1),
+		{_, <<"keep-alive">>} = lists:keyfind(<<"connection">>, 1, Headers1),
+		{response, fin, 303, Headers2} = gun:await(ConnPid, Ref2),
+		{_, <<"keep-alive">>} = lists:keyfind(<<"connection">>, 1, Headers2)
+	end || {Ref1, Ref2} <- Refs],
+	ok.
 
-rest_keepalive_post_loop(_, _, _, 0) ->
-	ok;
-rest_keepalive_post_loop(Config, Client, simple_post, N) ->
-	Headers = [
-		{<<"connection">>, <<"keep-alive">>},
-		{<<"content-type">>, <<"text/plain">>}
-	],
-	{ok, Client2} = cowboy_client:request(<<"POST">>,
-		build_url("/simple_post", Config), Headers, "12345", Client),
-	{ok, 303, RespHeaders, Client3} = cowboy_client:response(Client2),
-	{<<"connection">>, <<"keep-alive">>}
-		= lists:keyfind(<<"connection">>, 1, RespHeaders),
-	rest_keepalive_post_loop(Config, Client3, forbidden_post, N - 1);
-rest_keepalive_post_loop(Config, Client, forbidden_post, N) ->
-	Headers = [
-		{<<"connection">>, <<"keep-alive">>},
-		{<<"content-type">>, <<"text/plain">>}
-	],
-	{ok, Client2} = cowboy_client:request(<<"POST">>,
-		build_url("/forbidden_post", Config), Headers, "12345", Client),
-	{ok, 403, RespHeaders, Client3} = cowboy_client:response(Client2),
-	{<<"connection">>, <<"keep-alive">>}
-		= lists:keyfind(<<"connection">>, 1, RespHeaders),
-	rest_keepalive_post_loop(Config, Client3, simple_post, N - 1).
+rest_missing_get_callbacks(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/missing_get_callbacks"),
+	{response, fin, 500, _} = gun:await(ConnPid, Ref),
+	ok.
+
+rest_missing_put_callbacks(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:put(ConnPid, "/missing_put_callbacks",
+		[{<<"content-type">>, <<"application/json">>}], <<"{}">>),
+	{response, fin, 500, _} = gun:await(ConnPid, Ref),
+	ok.
 
 rest_nodelete(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"DELETE">>,
-		build_url("/nodelete", Config), Client),
-	{ok, 500, _, _} = cowboy_client:response(Client2).
+	ConnPid = gun_open(Config),
+	Ref = gun:delete(ConnPid, "/nodelete"),
+	{response, fin, 500, _} = gun:await(ConnPid, Ref),
+	ok.
+
+rest_options_default(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:options(ConnPid, "/rest_empty_resource"),
+	{response, fin, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"HEAD, GET, OPTIONS">>} = lists:keyfind(<<"allow">>, 1, Headers),
+	ok.
+
+rest_patch(Config) ->
+	Tests = [
+		{204, [{<<"content-type">>, <<"text/plain">>}], <<"whatever">>},
+		{422, [{<<"content-type">>, <<"text/plain">>}], <<"false">>},
+		{400, [{<<"content-type">>, <<"text/plain">>}], <<"halt">>},
+		{415, [{<<"content-type">>, <<"application/json">>}], <<"bad_content_type">>}
+	],
+	ConnPid = gun_open(Config),
+	_ = [begin
+		Ref = gun:patch(ConnPid, "/patch", Headers, Body),
+		{response, fin, Status, _} = gun:await(ConnPid, Ref)
+	end || {Status, Headers, Body} <- Tests],
+	ok.
+
+rest_post_charset(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/post_charset",
+		[{<<"content-type">>, <<"text/plain;charset=UTF-8">>}], "12345"),
+	{response, fin, 204, _} = gun:await(ConnPid, Ref),
+	ok.
+
+rest_postonly(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/postonly",
+		[{<<"content-type">>, <<"text/plain">>}], "12345"),
+	{response, fin, 204, _} = gun:await(ConnPid, Ref),
+	ok.
 
 rest_resource_get_etag(Config, Type) ->
 	rest_resource_get_etag(Config, Type, []).
 
 rest_resource_get_etag(Config, Type, Headers) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/resetags?type=" ++ Type, Config), Headers, Client),
-	{ok, Status, RespHeaders, _} = cowboy_client:response(Client2),
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/resetags?type=" ++ Type, Headers),
+	{response, _, Status, RespHeaders} = gun:await(ConnPid, Ref),
 	case lists:keyfind(<<"etag">>, 1, RespHeaders) of
 		false -> {Status, false};
 		{<<"etag">>, ETag} -> {Status, ETag}
@@ -737,146 +947,263 @@ rest_resource_etags_if_none_match(Config) ->
 		{Ret, Type}
 	end || {Status, ETag, Type} <- Tests].
 
+set_env_dispatch(Config) ->
+	ConnPid1 = gun_open(Config),
+	Ref1 = gun:get(ConnPid1, "/"),
+	{response, fin, 400, _} = gun:await(ConnPid1, Ref1),
+	ok = cowboy:set_env(set_env, dispatch,
+		cowboy_router:compile([{'_', [{"/", http_handler, []}]}])),
+	ConnPid2 = gun_open(Config),
+	Ref2 = gun:get(ConnPid2, "/"),
+	{response, nofin, 200, _} = gun:await(ConnPid2, Ref2),
+	ok.
+
 set_resp_body(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/set_resp/body", Config), Client),
-	{ok, 200, _, Client3} = cowboy_client:response(Client2),
-	{ok, <<"A flameless dance does not equal a cycle">>, _}
-		= cowboy_client:response_body(Client3).
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/set_resp/body"),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, <<"A flameless dance does not equal a cycle">>}
+		= gun:await_body(ConnPid, Ref),
+	ok.
 
 set_resp_header(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/set_resp/header", Config), Client),
-	{ok, 200, Headers, _} = cowboy_client:response(Client2),
-	{<<"vary">>, <<"Accept">>} = lists:keyfind(<<"vary">>, 1, Headers),
-	{<<"set-cookie">>, _} = lists:keyfind(<<"set-cookie">>, 1, Headers).
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/set_resp/header"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"Accept">>} = lists:keyfind(<<"vary">>, 1, Headers),
+	{_, _} = lists:keyfind(<<"set-cookie">>, 1, Headers),
+	ok.
 
 set_resp_overwrite(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/set_resp/overwrite", Config), Client),
-	{ok, 200, Headers, _} = cowboy_client:response(Client2),
-	{<<"server">>, <<"DesireDrive/1.0">>}
-		= lists:keyfind(<<"server">>, 1, Headers).
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/set_resp/overwrite"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"DesireDrive/1.0">>} = lists:keyfind(<<"server">>, 1, Headers),
+	ok.
+
+slowloris(Config) ->
+	Client = raw_open(Config),
+	try
+		[begin
+			ok = raw_send(Client, [C]),
+			receive after 25 -> ok end
+		end || C <- "GET / HTTP/1.1\r\nHost: localhost\r\n"
+			"User-Agent: Mozilla/5.0 (Windows; U; Windows NT 6.0; en-US)\r\n"
+			"Cookie: name=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\r\n"],
+		error(failure)
+	catch error:{badmatch, _} ->
+		ok
+	end.
+
+slowloris2(Config) ->
+	Client = raw_open(Config),
+	ok = raw_send(Client, "GET / HTTP/1.1\r\n"),
+	receive after 300 -> ok end,
+	ok = raw_send(Client, "Host: localhost\r\n"),
+	receive after 300 -> ok end,
+	Data = raw_recv_head(Client),
+	{_, 408, _, _} = cow_http:parse_status_line(Data),
+	ok.
 
 static_attribute_etag(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/static_attribute_etag/test.html", Config), Client),
-	{ok, Client3} = cowboy_client:request(<<"GET">>,
-		build_url("/static_attribute_etag/test.html", Config), Client2),
-	{ok, 200, Headers1, Client4} = cowboy_client:response(Client3),
-	{ok, 200, Headers2, _} = cowboy_client:response(Client4),
-	{<<"etag">>, ETag1} = lists:keyfind(<<"etag">>, 1, Headers1),
-	{<<"etag">>, ETag2} = lists:keyfind(<<"etag">>, 1, Headers2),
-	false = ETag1 =:= undefined,
-	ETag1 = ETag2.
+	ConnPid = gun_open(Config),
+	Ref1 = gun:get(ConnPid, "/static_attribute_etag/index.html"),
+	Ref2 = gun:get(ConnPid, "/static_attribute_etag/index.html"),
+	{response, nofin, 200, Headers1} = gun:await(ConnPid, Ref1),
+	{response, nofin, 200, Headers2} = gun:await(ConnPid, Ref2),
+	{_, ETag} = lists:keyfind(<<"etag">>, 1, Headers1),
+	{_, ETag} = lists:keyfind(<<"etag">>, 1, Headers2),
+	true = ETag =/= undefined,
+	ok.
 
 static_function_etag(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/static_function_etag/test.html", Config), Client),
-	{ok, Client3} = cowboy_client:request(<<"GET">>,
-		build_url("/static_function_etag/test.html", Config), Client2),
-	{ok, 200, Headers1, Client4} = cowboy_client:response(Client3),
-	{ok, 200, Headers2, _} = cowboy_client:response(Client4),
-	{<<"etag">>, ETag1} = lists:keyfind(<<"etag">>, 1, Headers1),
-	{<<"etag">>, ETag2} = lists:keyfind(<<"etag">>, 1, Headers2),
-	false = ETag1 =:= undefined,
-	ETag1 = ETag2.
-
-%% Callback function for generating the ETag for the above test.
-static_function_etag(Arguments, etag_data) ->
-	{_, Filepath} = lists:keyfind(filepath, 1, Arguments),
-	{_, _Filesize} = lists:keyfind(filesize, 1, Arguments),
-	{_, _INode} = lists:keyfind(inode, 1, Arguments),
-	{_, _Modified} = lists:keyfind(mtime, 1, Arguments),
-	ChecksumCommand = lists:flatten(io_lib:format("sha1sum ~s", [Filepath])),
-	[Checksum|_] = string:tokens(os:cmd(ChecksumCommand), " "),
-	{strong, iolist_to_binary(Checksum)}.
+	ConnPid = gun_open(Config),
+	Ref1 = gun:get(ConnPid, "/static_function_etag/index.html"),
+	Ref2 = gun:get(ConnPid, "/static_function_etag/index.html"),
+	{response, nofin, 200, Headers1} = gun:await(ConnPid, Ref1),
+	{response, nofin, 200, Headers2} = gun:await(ConnPid, Ref2),
+	{_, ETag} = lists:keyfind(<<"etag">>, 1, Headers1),
+	{_, ETag} = lists:keyfind(<<"etag">>, 1, Headers2),
+	true = ETag =/= undefined,
+	ok.
 
 static_mimetypes_function(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/static_mimetypes_function/test.html", Config), Client),
-	{ok, 200, Headers, _} = cowboy_client:response(Client2),
-	{<<"content-type">>, <<"text/html">>}
-		= lists:keyfind(<<"content-type">>, 1, Headers).
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/static_mimetypes_function/index.html"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"text/html">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
 
 static_specify_file(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/static_specify_file", Config), Client),
-	{ok, 200, Headers, Client3} = cowboy_client:response(Client2),
-	{<<"content-type">>, <<"text/css">>}
-		= lists:keyfind(<<"content-type">>, 1, Headers),
-	{ok, <<"test_file.css\n">>, _} = cowboy_client:response_body(Client3).
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/static_specify_file"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"text/css">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	{ok, <<"body{color:red}\n">>} = gun:await_body(ConnPid, Ref),
+	ok.
 
 static_specify_file_catchall(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/static_specify_file/none", Config), Client),
-	{ok, 200, Headers, Client3} = cowboy_client:response(Client2),
-	{<<"content-type">>, <<"text/css">>}
-		= lists:keyfind(<<"content-type">>, 1, Headers),
-	{ok, <<"test_file.css\n">>, _} = cowboy_client:response_body(Client3).
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/static_specify_file/none"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"text/css">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	{ok, <<"body{color:red}\n">>} = gun:await_body(ConnPid, Ref),
+	ok.
 
 static_test_file(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/static/test_file", Config), Client),
-	{ok, 200, Headers, _} = cowboy_client:response(Client2),
-	{<<"content-type">>, <<"application/octet-stream">>}
-		= lists:keyfind(<<"content-type">>, 1, Headers).
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/static/unknown"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"application/octet-stream">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
 
 static_test_file_css(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/static/test_file.css", Config), Client),
-	{ok, 200, Headers, _} = cowboy_client:response(Client2),
-	{<<"content-type">>, <<"text/css">>}
-		= lists:keyfind(<<"content-type">>, 1, Headers).
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/static/style.css"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"text/css">>} = lists:keyfind(<<"content-type">>, 1, Headers),
+	ok.
 
 stream_body_set_resp(Config) ->
-	Client = ?config(client, Config),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/stream_body/set_resp", Config), Client),
-	{ok, 200, _, Client3} = cowboy_client:response(Client2),
-	{ok, <<"stream_body_set_resp">>, _}
-		= cowboy_client:response_body(Client3).
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/stream_body/set_resp"),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, <<"stream_body_set_resp">>} = gun:await_body(ConnPid, Ref),
+	ok.
+
+stream_body_set_resp_close(Config) ->
+	{ConnPid, MRef} = gun_monitor_open(Config),
+	Ref = gun:get(ConnPid, "/stream_body/set_resp_close"),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref, MRef),
+	{ok, <<"stream_body_set_resp_close">>} = gun:await_body(ConnPid, Ref, MRef),
+	gun_is_gone(ConnPid, MRef).
+
+stream_body_set_resp_chunked(Config) ->
+	ConnPid = gun_open(Config),
+	Ref = gun:get(ConnPid, "/stream_body/set_resp_chunked"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref),
+	{_, <<"chunked">>} = lists:keyfind(<<"transfer-encoding">>, 1, Headers),
+	{ok, <<"stream_body_set_resp_chunked">>} = gun:await_body(ConnPid, Ref),
+	ok.
+
+stream_body_set_resp_chunked10(Config) ->
+	{ConnPid, MRef} = gun_monitor_open(Config, [{http, [{version, 'HTTP/1.0'}]}]),
+	Ref = gun:get(ConnPid, "/stream_body/set_resp_chunked"),
+	{response, nofin, 200, Headers} = gun:await(ConnPid, Ref, MRef),
+	false = lists:keyfind(<<"transfer-encoding">>, 1, Headers),
+	{ok, <<"stream_body_set_resp_chunked">>} = gun:await_body(ConnPid, Ref, MRef),
+	gun_is_gone(ConnPid, MRef).
+
+%% Undocumented hack: force chunked response to be streamed as HTTP/1.1.
+streamed_response(Config) ->
+	Client = raw_open(Config),
+	ok = raw_send(Client, "GET /streamed_response HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+	Data = raw_recv_head(Client),
+	{'HTTP/1.1', 200, _, Rest} = cow_http:parse_status_line(Data),
+	{Headers, Rest2} = cow_http:parse_headers(Rest),
+	false = lists:keymember(<<"transfer-encoding">>, 1, Headers),
+	Rest2Size = byte_size(Rest2),
+	ok = case <<"streamed_handler\r\nworks fine!">> of
+		Rest2 -> ok;
+		<< Rest2:Rest2Size/binary, Expect/bits >> -> raw_expect_recv(Client, Expect)
+	end.
 
 te_chunked(Config) ->
-	Client = ?config(client, Config),
 	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
-	Chunks = body_to_chunks(50, Body, []),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/echo/body", Config),
-		[{<<"transfer-encoding">>, <<"chunked">>}],
-		Chunks, Client),
-	{ok, 200, _, Client3} = cowboy_client:response(Client2),
-	{ok, Body, _} = cowboy_client:response_body(Client3).
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/echo/body",
+		[{<<"transfer-encoding">>, <<"chunked">>}], Body),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, Body} = gun:await_body(ConnPid, Ref),
+	ok.
+
+body_to_chunks(_, <<>>, Acc) ->
+	lists:reverse([<<"0\r\n\r\n">>|Acc]);
+body_to_chunks(ChunkSize, Body, Acc) ->
+	BodySize = byte_size(Body),
+	ChunkSize2 = case BodySize < ChunkSize of
+		true -> BodySize;
+		false -> ChunkSize
+	end,
+	<< Chunk:ChunkSize2/binary, Rest/binary >> = Body,
+	ChunkSizeBin = list_to_binary(integer_to_list(ChunkSize2, 16)),
+	body_to_chunks(ChunkSize, Rest,
+		[<< ChunkSizeBin/binary, "\r\n", Chunk/binary, "\r\n" >>|Acc]).
+
+te_chunked_chopped(Config) ->
+	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
+	Body2 = iolist_to_binary(body_to_chunks(50, Body, [])),
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/echo/body",
+		[{<<"transfer-encoding">>, <<"chunked">>}]),
+	_ = [begin
+		ok = gun:dbg_send_raw(ConnPid, << C >>),
+		receive after 10 -> ok end
+	end || << C >> <= Body2],
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, Body} = gun:await_body(ConnPid, Ref),
+	ok.
 
 te_chunked_delayed(Config) ->
-	Client = ?config(client, Config),
 	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
 	Chunks = body_to_chunks(50, Body, []),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/echo/body", Config),
-		[{<<"transfer-encoding">>, <<"chunked">>}], Client),
-	{ok, Transport, Socket} = cowboy_client:transport(Client2),
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/echo/body",
+		[{<<"transfer-encoding">>, <<"chunked">>}]),
 	_ = [begin
-		ok = Transport:send(Socket, Chunk),
-		ok = timer:sleep(10)
+		ok = gun:dbg_send_raw(ConnPid, Chunk),
+		receive after 10 -> ok end
 	end || Chunk <- Chunks],
-	{ok, 200, _, Client3} = cowboy_client:response(Client2),
-	{ok, Body, _} = cowboy_client:response_body(Client3).
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, Body} = gun:await_body(ConnPid, Ref),
+	ok.
+
+te_chunked_split_body(Config) ->
+	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
+	Chunks = body_to_chunks(50, Body, []),
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/echo/body",
+		[{<<"transfer-encoding">>, <<"chunked">>}]),
+	_ = [begin
+		case Chunk of
+			<<"0\r\n\r\n">> ->
+				ok = gun:dbg_send_raw(ConnPid, Chunk);
+			_ ->
+				[Size, ChunkBody, <<>>] =
+					binary:split(Chunk, [<<"\r\n">>], [global]),
+				PartASize = random:uniform(byte_size(ChunkBody)),
+				<<PartA:PartASize/binary, PartB/binary>> = ChunkBody,
+				ok = gun:dbg_send_raw(ConnPid, [Size, <<"\r\n">>, PartA]),
+				receive after 10 -> ok end,
+				ok = gun:dbg_send_raw(ConnPid, [PartB, <<"\r\n">>])
+		end
+	end || Chunk <- Chunks],
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, Body} = gun:await_body(ConnPid, Ref),
+	ok.
+
+te_chunked_split_crlf(Config) ->
+	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
+	Chunks = body_to_chunks(50, Body, []),
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/echo/body",
+		[{<<"transfer-encoding">>, <<"chunked">>}]),
+	_ = [begin
+		%% Split in the newline just before the end of the chunk.
+		Len = byte_size(Chunk) - (random:uniform(2) - 1),
+		<< Chunk2:Len/binary, End/binary >> = Chunk,
+		ok = gun:dbg_send_raw(ConnPid, Chunk2),
+		receive after 10 -> ok end,
+		ok = gun:dbg_send_raw(ConnPid, End)
+	end || Chunk <- Chunks],
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, Body} = gun:await_body(ConnPid, Ref),
+	ok.
 
 te_identity(Config) ->
-	Client = ?config(client, Config),
 	Body = list_to_binary(io_lib:format("~p", [lists:seq(1, 100)])),
-	{ok, Client2} = cowboy_client:request(<<"GET">>,
-		build_url("/echo/body", Config), [], Body, Client),
-	{ok, 200, _, Client3} = cowboy_client:response(Client2),
-	{ok, Body, _} = cowboy_client:response_body(Client3).
+	ConnPid = gun_open(Config),
+	Ref = gun:post(ConnPid, "/echo/body", [], Body),
+	{response, nofin, 200, _} = gun:await(ConnPid, Ref),
+	{ok, Body} = gun:await_body(ConnPid, Ref),
+	ok.
